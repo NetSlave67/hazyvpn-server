@@ -1,0 +1,27 @@
+# Copy this to config.yaml and fill in your values, or override any field
+# with the matching HAZYVPN_* environment variable (see
+# instructions/architecture.md). Never commit a filled-in config.yaml —
+# it can hold SMTP credentials.
+
+# Where the SQLite database and the server's master encryption key live.
+# Matches the Dockerfile's volume; leave as-is under Docker.
+data_dir: /var/lib/hazyvpn-server
+
+# The hostname or IP peers use to reach this server. Combined with each
+# tenant's listen port to build that peer's Endpoint — required before you
+# create any tenant.
+public_host: vpn.example.net
+
+# Where downloaded configs/QR codes/tenant backups are written (the 'd'
+# export key in the TUI). Defaults to <data_dir>/exports if left empty.
+export_dir: ""
+
+# Optional: lets the TUI's 'e' email-config action send configs directly to
+# a peer. Leave host empty to disable.
+smtp:
+  host: ""
+  port: 587
+  username: ""
+  password: ""
+  from: "vpn@example.net"
+  use_tls: true

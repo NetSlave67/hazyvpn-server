@@ -16,7 +16,16 @@ RUN apk add --no-cache \
     ca-certificates
 COPY --from=builder /out/hazyvpn-server /usr/local/bin/hazyvpn-server
 
-VOLUME ["/var/lib/hazyvpn-server", "/etc/hazyvpn-server"]
+# Only the data dir is a real Docker-managed volume (it holds state that
+# must survive container recreation: the SQLite DB and master key).
+# /etc/hazyvpn-server is NOT declared here deliberately — it only ever holds
+# a single operator-supplied, read-only config.yaml bind-mounted in by
+# docker-compose.yml. Declaring it as a VOLUME too made Docker manage it as
+# an anonymous volume, which raced with that file bind-mount on container
+# recreation and intermittently left config.yaml bind-mounted as a
+# directory instead of a file (seen in production: "not a directory: Are
+# you trying to mount a directory onto a file?").
+VOLUME ["/var/lib/hazyvpn-server"]
 ENV HAZYVPN_DATA_DIR=/var/lib/hazyvpn-server
 ENTRYPOINT ["/usr/local/bin/hazyvpn-server"]
 # The container's own process just reconciles tenants and idles — the TUI

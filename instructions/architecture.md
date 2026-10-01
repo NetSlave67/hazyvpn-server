@@ -120,8 +120,13 @@ Single container, `docker-compose.yml` for the one-command path:
   effectively every current Linux kernel ≥5.6) — containers share the host
   kernel, so no userspace fallback is bundled initially. If you're on an
   older kernel without it, say so and we'll add a `wireguard-go` fallback.
-- Persistent volumes: `/var/lib/hazyvpn-server` (db + keys), `/etc/hazyvpn-server`
-  (config).
+- Persistent volume: `/var/lib/hazyvpn-server` (db + keys). `/etc/hazyvpn-server`
+  is deliberately **not** a Docker volume — it only ever holds a single
+  operator-supplied, read-only `config.yaml` bind-mounted in by
+  docker-compose.yml. Declaring it as a volume too (an earlier mistake)
+  made Docker manage it as an anonymous volume, which raced with that file
+  bind-mount on container recreation and intermittently mounted
+  `config.yaml` as a directory instead of a file.
 - The TUI is the container's entrypoint-adjacent admin tool, run via
   `docker exec -it hazyvpn-server hazyvpn-server`.
 
@@ -155,14 +160,48 @@ the conflicting value) — never a generic "failed".
    `docker exec`), so quitting the TUI never takes tenants' namespaces down.
 9. [x] `Dockerfile` + `docker-compose.yml`.
 10. [x] `README.md` (install/deploy/usage, mirroring client's README structure).
-11. [ ] Push to `github.com/NetSlave67/hazyvpn-server` — blocked on
-    `gh auth login` (no GitHub credentials available in the build
-    environment); repo is committed locally and ready to push.
-12. [ ] First real-world validation on an actual Docker host/VM: create a
-    tenant, confirm `ip netns`/`wg`/`nft` state, add a peer, and connect a
-    real WireGuard client. Everything up to the namespace/firewall syscalls
-    themselves is unit-tested, but nothing has exercised real root/netns
-    behavior yet — do this before relying on it for anything real.
+11. [x] Pushed to `github.com/NetSlave67/hazyvpn-server` (`main`).
+12. [x] First real-world validation, on Martin's own machine via
+    `docker compose up`. Found and fixed three real bugs the unit tests
+    couldn't catch (none involve fake-able logic — all three only show up
+    against a real kernel/Docker):
+    - `wg setconf` (the plain wg(8) config parser, as opposed to
+      wg-quick's extended format) rejected our rendered `Address` line
+      outright ("Line unrecognized") and aborted every tenant creation.
+      `ServerInterfaceConfig`/`RenderServerConfig` no longer emit it — the
+      tenant's address is assigned separately via `ip addr add` in
+      `netns.Manager.Create`, which was always correct.
+    - That failure exposed a second bug: `bringUpTenant` created the
+      namespace successfully before failing on the WireGuard sync step,
+      and nothing tore it back down — `CreateTenant`'s rollback only
+      deleted the DB row, leaving a live, fully-networked orphan
+      namespace behind. Fixed with a defer in `bringUpTenant`.
+    - The Dockerfile declared `/etc/hazyvpn-server` as a `VOLUME` even
+      though it only ever holds a single bind-mounted `config.yaml` file —
+      this made Docker manage it as an anonymous volume, which raced with
+      the file bind-mount on container recreation and intermittently
+      mounted `config.yaml` as a directory instead of a file. Removed
+      from `VOLUME`; only `/var/lib/hazyvpn-server` is a real volume now.
+
+    After all three fixes: tenant creation, peer creation, QR/config
+    rendering, and the full host-port-forwarding chain (Docker's own
+    published-port DNAT → the container's own `hazyvpn_host` DNAT table →
+    the nested tenant namespace's `wg0`) were all confirmed working
+    end-to-end against real `ip netns`/`wg`/`nft` state — see `wg show`
+    and `nft list ruleset` output captured during that session for exact
+    expected values.
+
+    **Still open:** this was all tested from the same LAN as the host
+    (`public_host` set to its LAN IP, e.g. `192.168.x.x`), not a real
+    internet-facing client. The host runs `ufw` with
+    `DEFAULT_FORWARD_POLICY="DROP"` — Docker's own rules usually take
+    priority over ufw's for published-port forwarding, but this
+    hasn't been confirmed with an actual external/cross-NAT connection
+    attempt. If a real WireGuard client fails to complete a handshake
+    once this is deployed for real (non-LAN) use, ufw's forward chain is
+    the first thing to check (`sudo ufw route allow proto udp from any to
+    any port <range>` or similar, or switching `DEFAULT_FORWARD_POLICY`
+    to `ACCEPT`).
 
 ## Non-goals (for now)
 

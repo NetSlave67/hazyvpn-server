@@ -120,9 +120,11 @@ netfilter state:
 - Two tenants can both use the same subnet with zero chance of collision.
 - A tenant's firewall rules (peer isolation, default-deny) can't leak into
   or be affected by another tenant's.
-- The host forwards each tenant's public UDP port into that tenant's
-  namespace via a single, additive DNAT table — it never touches or
-  overrides Docker's own iptables/nftables management of the host.
+- The container forwards each tenant's published UDP port into that
+  tenant's namespace via a single, additive DNAT table in its own top-level
+  namespace, picking up right where Docker's own port-publishing leaves
+  off — it never touches or overrides Docker's own iptables/nftables
+  management.
 
 See `instructions/architecture.md` for the full design rationale.
 

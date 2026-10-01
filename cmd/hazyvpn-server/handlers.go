@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strconv"
+
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -258,9 +260,19 @@ func (m model) updatePrompt(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.prompt.errMsg = "a file path is required"
 			return m, nil
 		}
+		newName := m.prompt.value("New Name")
+		newPort := 0
+		if v := m.prompt.value("New Listen Port"); v != "" {
+			p, err := strconv.Atoi(v)
+			if err != nil {
+				m.prompt.errMsg = "listen port must be a number"
+				return m, nil
+			}
+			newPort = p
+		}
 		m.modal, m.prompt = modalNone, nil
 		m.busy = true
-		return m, tea.Batch(importTenant(m.svc, path), m.spin.Tick)
+		return m, tea.Batch(importTenant(m.svc, path, newName, newPort), m.spin.Tick)
 	}
 	return m, nil
 }
@@ -269,14 +281,18 @@ func (m model) updatePrompt(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m model) startDelete() (tea.Model, tea.Cmd) {
 	if m.pane == paneTenants {
-		if t := m.selectedTenant(); t != nil {
-			m.modal = modalConfirmDeleteTenant
+		if m.selectedTenant() == nil {
+			m.setMessage(warnStyle.Render("Select a tenant first"))
+			return m, clearMessageAfter(messageTTL)
 		}
+		m.modal = modalConfirmDeleteTenant
 		return m, nil
 	}
-	if p := m.selectedPeer(); p != nil {
-		m.modal = modalConfirmDeletePeer
+	if m.selectedPeer() == nil {
+		m.setMessage(warnStyle.Render("Select a peer first"))
+		return m, clearMessageAfter(messageTTL)
 	}
+	m.modal = modalConfirmDeletePeer
 	return m, nil
 }
 
@@ -321,7 +337,12 @@ func (m model) startExport() (tea.Model, tea.Cmd) {
 
 func (m model) startImportPrompt() (tea.Model, tea.Cmd) {
 	if m.pane == paneTenants {
-		m.prompt = newPromptForm("Import Tenant Backup", "Path", "path to a backup .json file", "")
+		f := newForm("Import Tenant Backup")
+		f.addText("Path", "path to a backup .json file", "")
+		f.addText("New Name", "optional — overrides the name stored in the backup", "")
+		f.addText("New Listen Port", "optional — required if the original port is still in use", "")
+		f.focusField()
+		m.prompt = f
 		m.modal = modalPromptImportTenant
 		return m, nil
 	}

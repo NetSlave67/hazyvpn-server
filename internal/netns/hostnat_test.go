@@ -24,7 +24,12 @@ func TestHostRulesetDNATsEachTenantPort(t *testing.T) {
 	}
 }
 
-func TestSyncHostPortForwardingRunsOnHostNotNamespace(t *testing.T) {
+// TestSyncHostPortForwardingRunsWithoutNetnsExec confirms this table is
+// applied directly (no `ip netns exec <ns>` prefix) — i.e. inside whatever
+// namespace this process itself is already running in, not a nested tenant
+// namespace. See HostRuleset's doc comment for exactly which namespace that
+// turns out to be in the Docker deployment this targets.
+func TestSyncHostPortForwardingRunsWithoutNetnsExec(t *testing.T) {
 	fr := newFakeRunner()
 	m := newManagerWithRunner(fr)
 
@@ -37,5 +42,21 @@ func TestSyncHostPortForwardingRunsOnHostNotNamespace(t *testing.T) {
 	}
 	if !strings.Contains(last.stdin, "51001") {
 		t.Fatalf("expected ruleset piped via stdin to mention the tenant's port, got: %q", last.stdin)
+	}
+}
+
+// TestHostRulesetFlushesBeforeRedeclaring is the HostRuleset counterpart to
+// firewall_test.go's TestRulesetFlushesBeforeRedeclaring — see that test's
+// comment for why this matters. This table is the one where the bug it
+// guards against actually bit: a tenant restored under a new name reusing
+// an in-use listen port left two coexisting DNAT rules for the same port.
+func TestHostRulesetFlushesBeforeRedeclaring(t *testing.T) {
+	out, err := HostRuleset([]HostTenantPort{{TenantID: 1, ListenPort: 51001}})
+	if err != nil {
+		t.Fatalf("HostRuleset: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 2 || lines[0] != "add table ip hazyvpn_host" || lines[1] != "flush table ip hazyvpn_host" {
+		t.Fatalf("expected the ruleset to start with add+flush table statements, got:\n%s", out)
 	}
 }

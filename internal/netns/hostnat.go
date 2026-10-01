@@ -32,8 +32,18 @@ type HostTenantPort struct {
 // This table only adds DNAT/accept rules; it never sets a restrictive
 // default policy, so it can't interfere with Docker's own iptables/nftables
 // management of the container's namespace.
+//
+// Like Ruleset, this always starts with `add table` + `flush table` so
+// re-applying it (every tenant create/delete) replaces the rules instead
+// of appending a second copy of them on top — found live in production: a
+// tenant restored from backup under a new name reused the original
+// tenant's listen port, and without the flush both tenants' DNAT rules
+// coexisted in the same chain, leaving it up to nft's within-chain
+// evaluation order which tenant's traffic actually got there.
 func HostRuleset(tenants []HostTenantPort) (string, error) {
 	var b strings.Builder
+	b.WriteString("add table ip hazyvpn_host\n")
+	b.WriteString("flush table ip hazyvpn_host\n")
 	b.WriteString("table ip hazyvpn_host {\n")
 	b.WriteString("  chain prerouting {\n")
 	b.WriteString("    type nat hook prerouting priority -100; policy accept;\n")

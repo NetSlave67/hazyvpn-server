@@ -16,7 +16,16 @@ type FirewallSpec struct {
 }
 
 // Ruleset renders the nftables ruleset text for spec, suitable for feeding
-// to `nft -f -` inside the tenant's namespace.
+// to `nft -f -` inside the tenant's namespace. It always starts with
+// `add table` + `flush table`: nft's declarative `table { chain { ... } }`
+// syntax only ever *adds* the rules it lists — re-feeding the same table
+// definition when it already exists does not replace its rules, it
+// appends a second copy of them (rules are identified by an opaque handle,
+// not content). Without the flush, every re-application of this ruleset
+// (every tenant restart/reconcile) would leave the old rules in place and
+// pile up duplicates forever. `add table` makes the first-ever call (where
+// the table doesn't exist yet) safe too, since `flush` alone would fail on
+// a table that was never created.
 //
 // Policy: default-drop forward, allow the tenant's WireGuard traffic out to
 // the host link (and from there to the internet via NAT), allow established/
@@ -26,6 +35,8 @@ type FirewallSpec struct {
 // road-warriors from reaching each other through the server.
 func Ruleset(spec FirewallSpec) string {
 	var b strings.Builder
+	fmt.Fprintf(&b, "add table inet hazyvpn\n")
+	fmt.Fprintf(&b, "flush table inet hazyvpn\n")
 	fmt.Fprintf(&b, "table inet hazyvpn {\n")
 	fmt.Fprintf(&b, "  chain forward {\n")
 	fmt.Fprintf(&b, "    type filter hook forward priority 0; policy drop;\n")

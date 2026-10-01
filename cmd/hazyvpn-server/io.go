@@ -121,13 +121,16 @@ func importPeerFromFile(svc *app.Service, tenantID int64, path string) (string, 
 	return peer.Name, nil
 }
 
-// importTenantFromFile restores a tenant backup, keeping its original name.
-func importTenantFromFile(svc *app.Service, path string) (string, error) {
+// importTenantFromFile restores a tenant backup, using newName/newListenPort
+// in place of the values stored in the backup when non-empty/non-zero (so a
+// backup whose original name or listen port collides with an existing,
+// still-live tenant can still be restored).
+func importTenantFromFile(svc *app.Service, path, newName string, newListenPort int) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("reading %s: %w", path, err)
 	}
-	tenant, err := svc.ImportTenantBackup(bgCtx, data, "")
+	tenant, err := svc.ImportTenantBackup(bgCtx, data, newName, newListenPort)
 	if err != nil {
 		return "", err
 	}

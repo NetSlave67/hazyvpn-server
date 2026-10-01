@@ -54,8 +54,16 @@ func (s *Service) ExportTenantBackup(ctx context.Context, tenantID int64) ([]byt
 // ImportTenantBackup restores a TenantBackup as a brand-new tenant,
 // preserving every original key, address, and setting (so already-handed-out
 // peer configs keep working), then brings up its namespace exactly like a
-// freshly created tenant.
-func (s *Service) ImportTenantBackup(ctx context.Context, data []byte, newName string) (*store.Tenant, error) {
+// freshly created tenant. newName and newListenPort (0 to keep the
+// backup's original) let the operator resolve a collision with a tenant
+// that's still live — restoring a backup alongside its still-running
+// original is a completely normal thing to want to do (testing a restore,
+// migrating, cloning for a second environment), and both the name and the
+// listen port need to be unique for it to actually work: two tenants
+// sharing a listen port isn't just rejected, it's a *silent* failure — the
+// host's DNAT table can only route that port to one of them, and nothing
+// about the TUI would show you which one lost.
+func (s *Service) ImportTenantBackup(ctx context.Context, data []byte, newName string, newListenPort int) (*store.Tenant, error) {
 	var backup TenantBackup
 	if err := json.Unmarshal(data, &backup); err != nil {
 		return nil, fmt.Errorf("app: decoding backup: %w", err)
@@ -63,10 +71,20 @@ func (s *Service) ImportTenantBackup(ctx context.Context, data []byte, newName s
 	if newName != "" {
 		backup.Tenant.Name = newName
 	}
+	if newListenPort != 0 {
+		backup.Tenant.ListenPort = newListenPort
+	}
 
 	subnet, err := ipam.ParseSubnet(backup.Tenant.Subnet)
 	if err != nil {
 		return nil, err
+	}
+	if existing, err := s.store.ListTenants(ctx); err == nil {
+		for _, t := range existing {
+			if t.ListenPort == backup.Tenant.ListenPort {
+				return nil, fmt.Errorf("app: listen port %d is already used by tenant %q — import again with a different listen port", backup.Tenant.ListenPort, t.Name)
+			}
+		}
 	}
 
 	tenant, err := s.store.CreateTenant(ctx, backup.Tenant)

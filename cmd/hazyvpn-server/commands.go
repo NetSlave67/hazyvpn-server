@@ -96,9 +96,9 @@ func importPeer(svc *app.Service, tenantID int64, path string) tea.Cmd {
 	}
 }
 
-func importTenant(svc *app.Service, path string) tea.Cmd {
+func importTenant(svc *app.Service, path, newName string, newListenPort int) tea.Cmd {
 	return func() tea.Msg {
-		name, err := importTenantFromFile(svc, path)
+		name, err := importTenantFromFile(svc, path, newName, newListenPort)
 		return importedTenantMsg{name: name, err: err}
 	}
 }

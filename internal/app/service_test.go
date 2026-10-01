@@ -308,7 +308,7 @@ func TestExportImportTenantBackupRoundTrip(t *testing.T) {
 		t.Fatalf("ExportTenantBackup: %v", err)
 	}
 
-	restored, err := svc.ImportTenantBackup(ctx, data, "acme-restored")
+	restored, err := svc.ImportTenantBackup(ctx, data, "acme-restored", 51821)
 	if err != nil {
 		t.Fatalf("ImportTenantBackup: %v", err)
 	}
@@ -318,6 +318,43 @@ func TestExportImportTenantBackupRoundTrip(t *testing.T) {
 	}
 	if len(peers) != 1 || peers[0].Name != "alice" || peers[0].Address != "10.8.0.2" {
 		t.Fatalf("restored peers = %+v, want alice at 10.8.0.2", peers)
+	}
+}
+
+// TestImportTenantBackupRejectsListenPortCollision guards against a real
+// bug found in production: restoring a backup alongside its still-live
+// original (same listen port, different name) silently left two tenants
+// sharing one DNAT rule — the host could only route that port to one of
+// them, and the TUI gave no indication which tenant lost. The original
+// name collision was always caught; the listen-port collision was not.
+func TestImportTenantBackupRejectsListenPortCollision(t *testing.T) {
+	fn := &fakeNet{}
+	svc, _ := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	data, err := svc.ExportTenantBackup(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("ExportTenantBackup: %v", err)
+	}
+
+	// New name, but the backup's listen port (51820) is still in use by
+	// the live "acme" tenant — must be rejected, not silently accepted.
+	_, err = svc.ImportTenantBackup(ctx, data, "acme-clone", 0)
+	if err == nil {
+		t.Fatal("expected ImportTenantBackup to reject a colliding listen port")
+	}
+
+	// Explicitly providing a free port must succeed.
+	restored, err := svc.ImportTenantBackup(ctx, data, "acme-clone", 51821)
+	if err != nil {
+		t.Fatalf("ImportTenantBackup with a free port: %v", err)
+	}
+	if restored.ListenPort != 51821 {
+		t.Fatalf("restored.ListenPort = %d, want 51821", restored.ListenPort)
 	}
 }
 

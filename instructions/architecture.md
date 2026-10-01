@@ -202,6 +202,37 @@ the conflicting value) — never a generic "failed".
     the first thing to check (`sudo ufw route allow proto udp from any to
     any port <range>` or similar, or switching `DEFAULT_FORWARD_POLICY`
     to `ACCEPT`).
+13. [x] Full feature + error-handling sweep, driven directly through a live
+    TUI session against the real container (every form validation path,
+    every confirm/cancel flow, both import types including the dangerous-
+    hooks rejection, export, email, clipboard, help, and the two-tenants-
+    sharing-a-subnet claim re-verified at the kernel level). Found and
+    fixed three more real bugs:
+    - nft rule accumulation: `nft -f -` re-feeding an already-existing
+      `table { chain { ... } }` *appends* its rules rather than replacing
+      them (rules are identified by handle, not content). Every tenant
+      create and every daemon/TUI startup reconcile re-applies both
+      `Ruleset` (per-tenant firewall) and `HostRuleset` (port forwarding),
+      so rulesets were doubling on every restart — confirmed live. Both
+      now open with `add table` + `flush table`.
+    - That accumulation is what surfaced a second bug: restoring a backup
+      under a new name, alongside its still-live original, silently reused
+      the original's listen port — two tenants sharing a port is a *silent*
+      failure (the DNAT table can only route it to one of them).
+      `ImportTenantBackup` now validates listen-port uniqueness like
+      `CreateTenant` always did, and the TUI gained a "New Listen Port"
+      override field alongside the "New Name" one added earlier in this
+      same pass (the name collision was always caught; nothing let you
+      resolve it without hand-editing the backup JSON until now).
+    - `startDelete()` gave zero feedback when nothing was selected, unlike
+      every other action. Now consistent.
+
+    Everything else held up under direct testing with no changes needed:
+    every IPAM validation message (duplicate/out-of-subnet/reserved
+    address), duplicate tenant name/listen port rejection, cascade-delete,
+    clipboard-unavailable graceful failure, SMTP-not-configured graceful
+    failure, and full state survival (exact same keys/ports/peers) across
+    a complete container rebuild.
 
 ## Non-goals (for now)
 

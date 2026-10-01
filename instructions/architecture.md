@@ -238,3 +238,60 @@ the conflicting value) — never a generic "failed".
 
 No web UI, no multi-admin auth/RBAC, no clustering/HA, no non-Linux support.
 These can be reconsidered once the single-node TUI tool is solid.
+
+## Feature additions after initial validation (2026-10-02)
+
+Three feature requests plus a cosmetic fix, from feedback after the first
+round of live testing:
+
+- **Pane focus fix.** Both panes rendered their cursor row in the same bold
+  accent color regardless of which was actually focused — the only real
+  signal was a subtler border/marker color difference. The inactive pane's
+  cursor row now uses a dim `inactiveSelectedStyle` instead, so there's
+  only ever one clearly "live" selection on screen.
+- **Enable/disable (`t`)** for both tenants and peers, without touching a
+  single key. Disabling a tenant tears its namespace down entirely;
+  disabling a peer excludes it from the tenant's live WireGuard config.
+  Re-enabling brings back the identical tunnel. Each direction only
+  commits its database flag once the matching live action has actually
+  succeeded, matching CreateTenant/DeleteTenant's existing discipline.
+- **Isolation exceptions (`o`).** A tenant with `IsolatePeers` on can name
+  destination IPs/CIDRs that stay reachable despite peer isolation — e.g.
+  a shared jump host every road-warrior should still reach. Rendered as
+  nftables accept rules placed *before* the isolation drop rule (`Ruleset`
+  in `internal/netns/firewall.go`), since nft evaluates a chain's rules in
+  order. Settable at tenant creation or edited live afterward.
+- **Live peer stats.** The peers pane shows a connected/not indicator and
+  last-handshake time, read from `wg show <iface> dump`
+  (`internal/netns/stats.go`) on a 3-second tick plus immediately whenever
+  peers (re)load.
+
+This round required a real schema migration, not just a schema-string
+edit — `CREATE TABLE IF NOT EXISTS` is a no-op against an already-existing
+table, so the new `isolation_exceptions`/`enabled` columns never reached a
+database created by the previous code version. **Confirmed live**: this
+crash-looped the daemon with `no such column: isolation_exceptions` on
+every single query immediately after redeploying. Fixed with explicit
+`ALTER TABLE ... ADD COLUMN` migrations in `store.Open`, each tolerating
+SQLite's "duplicate column name" error so a fresh database (where
+`CREATE TABLE` already added the column) doesn't fail either. **Any future
+schema change needs the same two-part treatment**: add the column to the
+`schema` string *and* add a migration statement — the schema string alone
+only ever helps a brand-new database.
+
+Every new code path was validated live against the real container after
+the migration fix, not just unit-tested:
+- Pane-focus fix confirmed via raw ANSI escape codes (`tmux capture-pane -e`)
+  showing the correct style swap between active/inactive panes.
+- Tenant and peer enable/disable confirmed both directions against real
+  `ip netns list`/`wg show`/the host DNAT table — namespace genuinely torn
+  down and recreated, keys genuinely unchanged, port forwarding genuinely
+  excluded/restored.
+- Isolation exceptions confirmed via real `nft list ruleset` output showing
+  the exact rule ordering (exception accept before isolation drop) for all
+  three paths: set at creation, edited afterward, and cleared back out —
+  with no rule duplication across any of it.
+- Live stats confirmed rendering correctly (dot + handshake text) for
+  peers with no real connection yet.
+- Empty-selection warnings confirmed for the new `t`/`o` actions, matching
+  the existing pattern for every other action.

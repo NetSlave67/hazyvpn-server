@@ -22,6 +22,14 @@ const (
 	// point-to-point host<->namespace addressing. It's never routed beyond
 	// the host and never seen by WireGuard peers.
 	linkBase = "169.254.0.0"
+	// LinkRangeCIDR is the full range linkBase addresses are drawn from.
+	// Traffic leaving a tenant's namespace is already MASQUERADEd to an
+	// address in this range (see Ruleset's postrouting chain) before it
+	// reaches the container's own namespace — that address needs a second
+	// MASQUERADE of its own before it can leave *that* namespace too (see
+	// HostRuleset's postrouting chain), since it's link-local and Docker's
+	// own NAT only covers its bridge subnet, not this one.
+	LinkRangeCIDR = "169.254.0.0/16"
 )
 
 // maxTenantsForLinkAddressing is how many /30 point-to-point links fit in

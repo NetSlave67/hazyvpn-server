@@ -101,7 +101,11 @@ func TestDestroyIgnoresAlreadyGoneNamespace(t *testing.T) {
 	}
 }
 
-func TestSyncWireGuardWritesConfigAndCallsSetconf(t *testing.T) {
+// TestSyncWireGuardWritesConfigAndCallsSyncconf guards against regressing
+// to `wg setconf`, which was confirmed live to reset unrelated peers'
+// handshake/session state on every config change — see SyncWireGuard's
+// doc comment.
+func TestSyncWireGuardWritesConfigAndCallsSyncconf(t *testing.T) {
 	fr := newFakeRunner()
 	m := newManagerWithRunner(fr)
 
@@ -112,8 +116,8 @@ func TestSyncWireGuardWritesConfigAndCallsSetconf(t *testing.T) {
 	if last.name != "ip" || strings.Join(last.args[:4], " ") != "netns exec hazy-t5 wg" {
 		t.Fatalf("unexpected call: %+v", last)
 	}
-	if last.args[4] != "setconf" || last.args[5] != "wg0" {
-		t.Fatalf("expected 'wg setconf wg0 <path>', got args: %v", last.args)
+	if last.args[4] != "syncconf" || last.args[5] != "wg0" {
+		t.Fatalf("expected 'wg syncconf wg0 <path>', got args: %v", last.args)
 	}
 }
 

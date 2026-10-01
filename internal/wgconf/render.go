@@ -56,13 +56,15 @@ type ServerPeerSection struct {
 
 // ServerInterfaceConfig holds everything needed to render a tenant's
 // server-side WireGuard interface config. This is fed directly to
-// `wg setconf`, not `wg-quick` — unlike PeerConfig, it must stick to the
-// handful of directives the plain wg(8) config parser understands
-// (PrivateKey/ListenPort/FwMark and, per peer, PublicKey/PresharedKey/
-// AllowedIPs/Endpoint/PersistentKeepalive). Address is deliberately not a
-// field here: `wg setconf` rejects it outright ("Line unrecognized"), and
-// the tenant's own address is assigned separately via `ip addr add` when
-// its namespace is created (see netns.Manager.Create).
+// `wg syncconf` (see netns.Manager.SyncWireGuard), not `wg-quick` — unlike
+// PeerConfig, it must stick to the handful of directives the plain wg(8)
+// config parser understands (PrivateKey/ListenPort/FwMark and, per peer,
+// PublicKey/PresharedKey/AllowedIPs/Endpoint/PersistentKeepalive) — the
+// same strict set for `syncconf` as for `setconf`, since both share that
+// parser. Address is deliberately not a field here: it gets rejected
+// outright ("Line unrecognized"), and the tenant's own address is assigned
+// separately via `ip addr add` when its namespace is created (see
+// netns.Manager.Create).
 type ServerInterfaceConfig struct {
 	PrivateKey string
 	ListenPort int

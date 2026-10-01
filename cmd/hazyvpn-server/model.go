@@ -57,10 +57,12 @@ type model struct {
 	viewText string
 	viewKind string // "Config" or "QR" — used as the view modal's heading
 
-	// peerStats holds the live stats for the currently selected tenant's
-	// peers, keyed by public key. Refreshed whenever peers (re)load and on
-	// a periodic tick while the dashboard is visible.
-	peerStats map[string]netns.PeerStat
+	// allStats holds live peer stats for every enabled tenant, keyed by
+	// tenant ID and then by peer public key — fetched for every tenant (not
+	// just the selected one) so the dashboard can show both a per-tenant
+	// traffic total in each tenant row and an overall total in the header.
+	// Refreshed whenever peers (re)load and on a periodic tick.
+	allStats map[int64]map[string]netns.PeerStat
 
 	keys keyMap
 	help help.Model
@@ -122,4 +124,26 @@ func (m *model) clampCursors() {
 	if m.peerCursor >= len(m.peers) {
 		m.peerCursor = max(0, len(m.peers)-1)
 	}
+}
+
+// tenantTraffic sums live rx/tx across every peer currently known for one
+// tenant. Zero values for a tenant not yet in allStats (never fetched, or
+// disabled) rather than an error — traffic totals are a best-effort display,
+// not a correctness-critical path.
+func (m model) tenantTraffic(tenantID int64) (rx, tx int64) {
+	for _, stat := range m.allStats[tenantID] {
+		rx += stat.RxBytes
+		tx += stat.TxBytes
+	}
+	return rx, tx
+}
+
+// overallTraffic sums tenantTraffic across every tenant currently known.
+func (m model) overallTraffic() (rx, tx int64) {
+	for tenantID := range m.allStats {
+		r, t := m.tenantTraffic(tenantID)
+		rx += r
+		tx += t
+	}
+	return rx, tx
 }

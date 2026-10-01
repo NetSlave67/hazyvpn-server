@@ -101,7 +101,9 @@ func (m model) dashboardView() string {
 func (m model) headerView() string {
 	title := titleStyle.Render("HazyVPN Server")
 	sub := dimStyle.Render(fmt.Sprintf("%d tenant(s)", len(m.tenants)))
-	return title + "  " + sub + "\n"
+	rx, tx := m.overallTraffic()
+	traffic := dimStyle.Render(fmt.Sprintf("↓ %s  ↑ %s", formatBytes(rx), formatBytes(tx)))
+	return title + "  " + sub + "  " + traffic + "\n"
 }
 
 func (m model) tenantsPane(height int) string {
@@ -114,7 +116,10 @@ func (m model) tenantsPane(height int) string {
 	}
 	for i, t := range m.tenants {
 		line := fmt.Sprintf("%s · %s · :%d", t.Name, t.Subnet, t.ListenPort)
-		if !t.Enabled {
+		if t.Enabled {
+			rx, tx := m.tenantTraffic(t.ID)
+			line += fmt.Sprintf(" · ↓%s ↑%s", formatBytes(rx), formatBytes(tx))
+		} else {
 			line += " · disabled"
 		}
 		if i == m.tenantCursor {
@@ -150,20 +155,25 @@ func (m model) peersPane(height int) string {
 		if len(m.peers) == 0 {
 			b.WriteString(dimStyle.Render("No peers yet — press a to add one.\n"))
 		}
+		stats := m.allStats[t.ID]
 		for i, p := range m.peers {
 			dot := dimStyle.Render("○")
 			handshake := "never"
+			traffic := ""
 			if p.Enabled {
-				if stat, ok := m.peerStats[p.PublicKey]; ok {
+				if stat, ok := stats[p.PublicKey]; ok {
 					handshake = formatHandshake(stat.LastHandshake)
 					if stat.Connected() {
 						dot = activeStyle.Render("●")
+					}
+					if stat.RxBytes > 0 || stat.TxBytes > 0 {
+						traffic = fmt.Sprintf(" · ↓%s ↑%s", formatBytes(stat.RxBytes), formatBytes(stat.TxBytes))
 					}
 				}
 			} else {
 				handshake = "disabled"
 			}
-			line := fmt.Sprintf("%s %s · %s · %s", dot, p.Name, p.Address, handshake)
+			line := fmt.Sprintf("%s %s · %s · %s%s", dot, p.Name, p.Address, handshake, traffic)
 			switch {
 			case i == m.peerCursor && m.pane == panePeers:
 				b.WriteString(inputPromptStyle.Render("› ") + selectedNameStyle.Render(line) + "\n")

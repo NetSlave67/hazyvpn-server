@@ -133,6 +133,15 @@ func (m *Manager) Destroy(tenantID int64) error {
 // SyncWireGuard replaces the WireGuard interface/peer configuration inside
 // a tenant's namespace with configText (as rendered by
 // wgconf.RenderServerConfig), without flapping the interface.
+//
+// Uses `wg syncconf`, not `wg setconf` — found live: setconf tears down and
+// recreates every peer listed in the file, including ones whose config
+// didn't actually change, which reset their live handshake/session state
+// any time *any* peer on the same tenant was added, removed, or toggled.
+// syncconf diffs against the interface's current state first and only
+// touches what actually changed, which is exactly why wg-quick itself uses
+// syncconf rather than setconf for reloads. Same config-file format, same
+// strict directive set — this is a drop-in swap.
 func (m *Manager) SyncWireGuard(tenantID int64, configText string) error {
 	ns := Namespace(tenantID)
 	tmp, err := os.CreateTemp("", "hazyvpn-wg-*.conf")
@@ -146,7 +155,7 @@ func (m *Manager) SyncWireGuard(tenantID int64, configText string) error {
 	}
 	tmp.Close()
 
-	if _, err := m.run.Run("ip", "netns", "exec", ns, "wg", "setconf", WGInterface, tmp.Name()); err != nil {
+	if _, err := m.run.Run("ip", "netns", "exec", ns, "wg", "syncconf", WGInterface, tmp.Name()); err != nil {
 		return fmt.Errorf("netns: applying WireGuard config: %w", err)
 	}
 	return nil

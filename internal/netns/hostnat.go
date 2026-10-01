@@ -14,9 +14,21 @@ type HostTenantPort struct {
 }
 
 // HostRuleset renders the nftables table that forwards each tenant's UDP
-// port to that tenant's namespace. Because every tenant's wg0 interface
-// lives inside its own namespace, it has no direct path to receive traffic
-// from outside that namespace — this DNAT rule is what bridges the two.
+// port to that tenant's namespace, and NATs their outbound internet traffic
+// on the way back out. Because every tenant's wg0 interface lives inside
+// its own namespace, it has no direct path to receive traffic from outside
+// that namespace — the DNAT rules bridge the inbound direction.
+//
+// The outbound direction needs its own fix too, found live: a tenant
+// namespace's own postrouting chain (see Ruleset) already MASQUERADEs its
+// WireGuard subnet to a link-local address in LinkRangeCIDR before routing
+// out to the container's namespace — but that link-local address isn't
+// globally routable, and Docker's own NAT only covers traffic sourced from
+// its own bridge subnet, not this one. Without a second MASQUERADE here,
+// a client's internet-bound traffic reaches exactly as far as that
+// link-local hop and no further (confirmed live: it was the last hop a
+// traceroute could reach), even though the client could still reach the
+// tenant's own gateway address just fine.
 //
 // Despite the name, this table runs inside the hazyvpn-server *container's*
 // own top-level network namespace, not the true Docker host's root
@@ -64,6 +76,10 @@ func HostRuleset(tenants []HostTenantPort) (string, error) {
 		}
 		fmt.Fprintf(&b, "    ip daddr %s udp dport %d accept\n", nsLink, t.ListenPort)
 	}
+	b.WriteString("  }\n")
+	b.WriteString("  chain postrouting {\n")
+	b.WriteString("    type nat hook postrouting priority 100; policy accept;\n")
+	fmt.Fprintf(&b, "    ip saddr %s masquerade\n", LinkRangeCIDR)
 	b.WriteString("  }\n")
 	b.WriteString("}\n")
 	return b.String(), nil

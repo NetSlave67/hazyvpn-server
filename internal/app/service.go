@@ -464,3 +464,26 @@ func (s *Service) SetTenantIsolationExceptions(ctx context.Context, tenantID int
 func (s *Service) PeerStats(tenantID int64) (map[string]netns.PeerStat, error) {
 	return s.net.PeerStats(tenantID)
 }
+
+// AllPeerStats returns live peer stats for every enabled tenant, keyed by
+// tenant ID and then by peer public key — the data a cross-tenant traffic
+// summary is built from. A tenant whose namespace can't be read for
+// whatever reason is simply left out rather than failing the whole call:
+// one tenant's hiccup shouldn't blank an operator's view of every other
+// tenant's traffic.
+func (s *Service) AllPeerStats(ctx context.Context) (map[int64]map[string]netns.PeerStat, error) {
+	tenants, err := s.store.ListTenants(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("app: listing tenants: %w", err)
+	}
+	out := make(map[int64]map[string]netns.PeerStat, len(tenants))
+	for _, t := range tenants {
+		if !t.Enabled {
+			continue
+		}
+		if stats, err := s.net.PeerStats(t.ID); err == nil {
+			out[t.ID] = stats
+		}
+	}
+	return out, nil
+}

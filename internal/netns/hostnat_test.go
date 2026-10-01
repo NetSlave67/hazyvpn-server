@@ -24,6 +24,34 @@ func TestHostRulesetDNATsEachTenantPort(t *testing.T) {
 	}
 }
 
+// TestHostRulesetMasqueradesLinkRangeForInternetEgress guards a real bug
+// found live: a client with a full-tunnel AllowedIPs (0.0.0.0/0) could
+// reach its tenant's own gateway but nothing beyond it — traceroute died
+// exactly at the link-local address the tenant's own namespace MASQUERADEs
+// to (see Ruleset's postrouting chain) because nothing then re-NATted that
+// address before it left the container's own namespace via Docker's
+// bridge. Docker's own NAT only covers its bridge subnet, not this
+// link-local range, so this table has to do it.
+func TestHostRulesetMasqueradesLinkRangeForInternetEgress(t *testing.T) {
+	out, err := HostRuleset([]HostTenantPort{{TenantID: 1, ListenPort: 51001}})
+	if err != nil {
+		t.Fatalf("HostRuleset: %v", err)
+	}
+	if !strings.Contains(out, "ip saddr 169.254.0.0/16 masquerade") {
+		t.Fatalf("expected a masquerade rule for the link-local range, got:\n%s", out)
+	}
+}
+
+func TestHostRulesetMasqueradesEvenWithNoTenants(t *testing.T) {
+	out, err := HostRuleset(nil)
+	if err != nil {
+		t.Fatalf("HostRuleset: %v", err)
+	}
+	if !strings.Contains(out, "masquerade") {
+		t.Fatal("the masquerade rule should not depend on there being any tenants")
+	}
+}
+
 // TestSyncHostPortForwardingRunsWithoutNetnsExec confirms this table is
 // applied directly (no `ip netns exec <ns>` prefix) — i.e. inside whatever
 // namespace this process itself is already running in, not a nested tenant

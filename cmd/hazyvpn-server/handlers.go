@@ -33,7 +33,7 @@ func (m model) onPeersLoaded(msg peersLoadedMsg) (tea.Model, tea.Cmd) {
 	}
 	m.peers = msg.peers
 	m.clampCursors()
-	return m, fetchPeerStats(m.svc, msg.tenantID)
+	return m, fetchAllStats(m.svc)
 }
 
 func (m model) onTenantDefaults(msg tenantDefaultsMsg) (tea.Model, tea.Cmd) {

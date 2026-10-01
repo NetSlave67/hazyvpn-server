@@ -30,14 +30,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case statsTickMsg:
-		if t := m.selectedTenant(); t != nil {
-			return m, tea.Batch(fetchPeerStats(m.svc, t.ID), statsTick())
-		}
-		return m, statsTick()
+		return m, tea.Batch(fetchAllStats(m.svc), statsTick())
 
-	case peerStatsMsg:
-		if t := m.selectedTenant(); t != nil && t.ID == msg.tenantID && msg.err == nil {
-			m.peerStats = msg.stats
+	case allStatsMsg:
+		if msg.err == nil {
+			m.allStats = msg.stats
 		}
 		return m, nil
 

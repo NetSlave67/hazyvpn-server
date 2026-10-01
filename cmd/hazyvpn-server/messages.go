@@ -99,14 +99,13 @@ type peerDefaultsMsg struct {
 	err     error
 }
 
-// peerStatsMsg carries live stats for one tenant's peers. A non-nil err
-// (e.g. the tenant is disabled, so its namespace doesn't exist) is treated
-// as "no stats available" rather than shown as an error — it's an entirely
-// expected condition, not a failure.
-type peerStatsMsg struct {
-	tenantID int64
-	stats    map[string]netns.PeerStat
-	err      error
+// allStatsMsg carries live stats for every enabled tenant's peers (see
+// app.Service.AllPeerStats). A non-nil err means the tenant list itself
+// couldn't be read — a per-tenant namespace hiccup is already absorbed
+// inside AllPeerStats, not surfaced here.
+type allStatsMsg struct {
+	stats map[int64]map[string]netns.PeerStat
+	err   error
 }
 
 type toggleTenantEnabledMsg struct {

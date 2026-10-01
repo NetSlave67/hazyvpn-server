@@ -27,6 +27,7 @@ type fakeNet struct {
 	existing      map[int64]bool // tenants whose namespace Exists should report true
 	stats         map[string]netns.PeerStat
 	statsErr      error
+	statsErrFor   map[int64]bool // tenant IDs whose PeerStats call should fail specifically
 }
 
 func (f *fakeNet) EnsureHostForwarding() error { return nil }
@@ -74,6 +75,9 @@ func (f *fakeNet) SyncHostPortForwarding(tenants []netns.HostTenantPort) error {
 }
 
 func (f *fakeNet) PeerStats(tenantID int64) (map[string]netns.PeerStat, error) {
+	if f.statsErrFor[tenantID] {
+		return nil, fmt.Errorf("fakeNet: injected PeerStats failure for tenant %d", tenantID)
+	}
 	if f.statsErr != nil {
 		return nil, f.statsErr
 	}
@@ -688,6 +692,46 @@ func TestPeerStatsPassesThroughToNetManager(t *testing.T) {
 	}
 	if stats["abc"].RxBytes != 42 {
 		t.Fatalf("PeerStats = %+v, want RxBytes 42", stats)
+	}
+}
+
+func TestAllPeerStatsExcludesDisabledTenantsAndFailures(t *testing.T) {
+	fn := &fakeNet{stats: map[string]netns.PeerStat{"abc": {RxBytes: 42}}}
+	svc, _ := newTestService(t, fn)
+	ctx := context.Background()
+
+	a, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "a", Subnet: "10.1.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant(a): %v", err)
+	}
+	b, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "b", Subnet: "10.2.0.0/24", ListenPort: 51821})
+	if err != nil {
+		t.Fatalf("CreateTenant(b): %v", err)
+	}
+	c, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "c", Subnet: "10.3.0.0/24", ListenPort: 51822})
+	if err != nil {
+		t.Fatalf("CreateTenant(c): %v", err)
+	}
+	if err := svc.SetTenantEnabled(ctx, b.ID, false); err != nil {
+		t.Fatalf("disable b: %v", err)
+	}
+	fn.statsErrFor = map[int64]bool{c.ID: true} // simulate a namespace read hiccup for c
+
+	all, err := svc.AllPeerStats(ctx)
+	if err != nil {
+		t.Fatalf("AllPeerStats: %v", err)
+	}
+	if _, ok := all[a.ID]; !ok {
+		t.Fatal("expected stats for enabled, readable tenant a")
+	}
+	if _, ok := all[b.ID]; ok {
+		t.Fatal("did not expect stats for disabled tenant b")
+	}
+	if _, ok := all[c.ID]; ok {
+		t.Fatal("expected tenant c's PeerStats failure to just be omitted, not surfaced as a whole-call error")
+	}
+	if all[a.ID]["abc"].RxBytes != 42 {
+		t.Fatalf("stats for tenant a = %+v, want RxBytes 42 for peer abc", all[a.ID])
 	}
 }
 

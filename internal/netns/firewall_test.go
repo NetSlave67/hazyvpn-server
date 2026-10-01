@@ -30,6 +30,34 @@ func TestRulesetIsolatePeersAddsDropRule(t *testing.T) {
 	}
 }
 
+func TestRulesetExceptionAcceptsBeforeIsolationDrop(t *testing.T) {
+	_, subnet, _ := net.ParseCIDR("10.8.0.0/24")
+	_, exception, _ := net.ParseCIDR("10.8.0.5/32")
+	out := Ruleset(FirewallSpec{WGSubnet: subnet, IsolatePeers: true, Exceptions: []*net.IPNet{exception}})
+
+	acceptIdx := strings.Index(out, "ip daddr 10.8.0.5/32 accept")
+	dropIdx := strings.Index(out, "ct state new drop")
+	if acceptIdx < 0 {
+		t.Fatalf("expected an accept rule for the exception address, got:\n%s", out)
+	}
+	if dropIdx < 0 {
+		t.Fatalf("expected the isolation drop rule to still be present, got:\n%s", out)
+	}
+	if acceptIdx > dropIdx {
+		t.Fatalf("exception accept rule must come before the isolation drop rule (nft evaluates in order), got:\n%s", out)
+	}
+}
+
+func TestRulesetExceptionsIgnoredWhenNotIsolating(t *testing.T) {
+	_, subnet, _ := net.ParseCIDR("10.8.0.0/24")
+	_, exception, _ := net.ParseCIDR("10.8.0.5/32")
+	out := Ruleset(FirewallSpec{WGSubnet: subnet, IsolatePeers: false, Exceptions: []*net.IPNet{exception}})
+
+	if strings.Contains(out, "10.8.0.5") {
+		t.Fatalf("exceptions only matter when isolating peers; an explicit exception rule when IsolatePeers is false is meaningless clutter, got:\n%s", out)
+	}
+}
+
 // TestRulesetFlushesBeforeRedeclaring guards against a real bug found in
 // production: nft's declarative `table { chain { ... } }` syntax only ever
 // *adds* the listed rules — re-feeding the same ruleset to an

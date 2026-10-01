@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 
 	"hazyvpn-server/internal/ipam"
 	"hazyvpn-server/internal/mail"
@@ -28,6 +29,7 @@ type NetManager interface {
 	SyncWireGuard(tenantID int64, configText string) error
 	ApplyFirewall(tenantID int64, spec netns.FirewallSpec) error
 	SyncHostPortForwarding(tenants []netns.HostTenantPort) error
+	PeerStats(tenantID int64) (map[string]netns.PeerStat, error)
 }
 
 // Service implements every tenant/peer operation the TUI exposes.
@@ -65,6 +67,55 @@ type CreateTenantParams struct {
 	Keepalive    int
 	PSKRequired  bool
 	IsolatePeers bool
+	// IsolationExceptions are destination IPs/CIDRs, comma-separated, that
+	// stay reachable even with IsolatePeers on — see parseExceptions.
+	IsolationExceptions string
+}
+
+// parseExceptions parses a comma-separated list of IPs/CIDRs into the form
+// nftables rules need. A bare IP (no "/") is treated as a single host
+// (/32 or /128). Returns a specific error naming exactly which entry
+// didn't parse, rather than a generic "invalid exceptions" failure.
+func parseExceptions(raw string) ([]*net.IPNet, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]*net.IPNet, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, ipnet, err := net.ParseCIDR(part); err == nil {
+			out = append(out, ipnet)
+			continue
+		}
+		ip := net.ParseIP(part)
+		if ip == nil {
+			return nil, fmt.Errorf("app: %q is not a valid IP address or CIDR", part)
+		}
+		bits := 32
+		if ip.To4() == nil {
+			bits = 128
+		}
+		out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+	}
+	return out, nil
+}
+
+// firewallSpecFor builds the FirewallSpec for a tenant as currently stored,
+// parsing its isolation exceptions. Shared by every call site that applies
+// a tenant's firewall from its persisted settings (as opposed to
+// SetTenantIsolationExceptions, which validates a *new*, not-yet-stored
+// value before committing it).
+func firewallSpecFor(tenant *store.Tenant, subnet *net.IPNet) (netns.FirewallSpec, error) {
+	exceptions, err := parseExceptions(tenant.IsolationExceptions)
+	if err != nil {
+		return netns.FirewallSpec{}, fmt.Errorf("app: tenant %q has an invalid stored isolation exception %q: %w", tenant.Name, tenant.IsolationExceptions, err)
+	}
+	return netns.FirewallSpec{WGSubnet: subnet, IsolatePeers: tenant.IsolatePeers, Exceptions: exceptions}, nil
 }
 
 // SuggestSubnet returns the first /24 in 10.<n>.0.0/24 (n = 0..255) not
@@ -122,6 +173,9 @@ func (s *Service) CreateTenant(ctx context.Context, p CreateTenantParams) (*stor
 	if p.ListenPort <= 0 || p.ListenPort > 65535 {
 		return nil, fmt.Errorf("app: listen port %d is out of range", p.ListenPort)
 	}
+	if _, err := parseExceptions(p.IsolationExceptions); err != nil {
+		return nil, err
+	}
 	if existing, err := s.store.ListTenants(ctx); err == nil {
 		for _, t := range existing {
 			if t.ListenPort == p.ListenPort {
@@ -145,16 +199,17 @@ func (s *Service) CreateTenant(ctx context.Context, p CreateTenantParams) (*stor
 	}
 
 	tenant, err := s.store.CreateTenant(ctx, store.TenantInput{
-		Name:             p.Name,
-		Subnet:           subnet.String(),
-		ListenPort:       p.ListenPort,
-		ServerPrivateKey: keypair.Private.String(),
-		ServerPublicKey:  keypair.Public.String(),
-		DNS:              p.DNS,
-		AllowedIPs:       allowedIPs,
-		Keepalive:        keepalive,
-		PSKRequired:      p.PSKRequired,
-		IsolatePeers:     p.IsolatePeers,
+		Name:                p.Name,
+		Subnet:              subnet.String(),
+		ListenPort:          p.ListenPort,
+		ServerPrivateKey:    keypair.Private.String(),
+		ServerPublicKey:     keypair.Public.String(),
+		DNS:                 p.DNS,
+		AllowedIPs:          allowedIPs,
+		Keepalive:           keepalive,
+		PSKRequired:         p.PSKRequired,
+		IsolatePeers:        p.IsolatePeers,
+		IsolationExceptions: p.IsolationExceptions,
 	})
 	if err != nil {
 		return nil, err
@@ -190,7 +245,11 @@ func (s *Service) bringUpTenant(ctx context.Context, tenant *store.Tenant, subne
 	if err := s.syncTenantWireGuard(ctx, tenant); err != nil {
 		return err
 	}
-	if err := s.net.ApplyFirewall(tenant.ID, netns.FirewallSpec{WGSubnet: subnet, IsolatePeers: tenant.IsolatePeers}); err != nil {
+	spec, err := firewallSpecFor(tenant, subnet)
+	if err != nil {
+		return err
+	}
+	if err := s.net.ApplyFirewall(tenant.ID, spec); err != nil {
 		return fmt.Errorf("app: applying firewall for tenant %q: %w", tenant.Name, err)
 	}
 	if err := s.syncHostForwarding(ctx); err != nil {
@@ -210,6 +269,9 @@ func (s *Service) syncTenantWireGuard(ctx context.Context, tenant *store.Tenant)
 
 	sections := make([]wgconf.ServerPeerSection, 0, len(peers))
 	for _, p := range peers {
+		if !p.Enabled {
+			continue // suspended: excluded from the live interface, keys untouched
+		}
 		sections = append(sections, wgconf.ServerPeerSection{
 			Name:         p.Name,
 			PublicKey:    p.PublicKey,
@@ -238,6 +300,9 @@ func (s *Service) syncHostForwarding(ctx context.Context) error {
 	}
 	ports := make([]netns.HostTenantPort, 0, len(tenants))
 	for _, t := range tenants {
+		if !t.Enabled {
+			continue // disabled tenants get no forwarding rule — the port goes nowhere
+		}
 		ports = append(ports, netns.HostTenantPort{TenantID: t.ID, ListenPort: t.ListenPort})
 	}
 	if err := s.net.SyncHostPortForwarding(ports); err != nil {
@@ -280,14 +345,21 @@ func (s *Service) Reconcile(ctx context.Context) error {
 
 	for i := range tenants {
 		tenant := &tenants[i]
-		subnet, err := ipam.ParseSubnet(tenant.Subnet)
-		if err != nil {
-			return fmt.Errorf("app: tenant %q has an invalid stored subnet %q: %w", tenant.Name, tenant.Subnet, err)
-		}
-
 		exists, err := s.net.Exists(tenant.ID)
 		if err != nil {
 			return fmt.Errorf("app: checking namespace for tenant %q: %w", tenant.Name, err)
+		}
+
+		if !tenant.Enabled {
+			if exists {
+				_ = s.net.Destroy(tenant.ID) // best-effort: bring live state in line with "disabled"
+			}
+			continue
+		}
+
+		subnet, err := ipam.ParseSubnet(tenant.Subnet)
+		if err != nil {
+			return fmt.Errorf("app: tenant %q has an invalid stored subnet %q: %w", tenant.Name, tenant.Subnet, err)
 		}
 		if !exists {
 			ones, _ := subnet.Mask.Size()
@@ -299,9 +371,96 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		if err := s.syncTenantWireGuard(ctx, tenant); err != nil {
 			return err
 		}
-		if err := s.net.ApplyFirewall(tenant.ID, netns.FirewallSpec{WGSubnet: subnet, IsolatePeers: tenant.IsolatePeers}); err != nil {
+		spec, err := firewallSpecFor(tenant, subnet)
+		if err != nil {
+			return err
+		}
+		if err := s.net.ApplyFirewall(tenant.ID, spec); err != nil {
 			return fmt.Errorf("app: reapplying firewall for tenant %q: %w", tenant.Name, err)
 		}
 	}
 	return s.syncHostForwarding(ctx)
+}
+
+// SetTenantEnabled pauses or resumes a tenant. Disabling tears the
+// namespace down entirely (no traffic in or out, no resources held) but
+// never touches the database row or any peer's keys/address, so enabling
+// it again brings back the identical tunnel — nothing to redistribute.
+// Each direction only commits its database flag once the matching live
+// action has actually succeeded, and rolls the flag back if it hasn't, so
+// the stored Enabled value always matches confirmed live state (the same
+// discipline DeleteTenant and CreateTenant already follow).
+func (s *Service) SetTenantEnabled(ctx context.Context, tenantID int64, enabled bool) error {
+	tenant, err := s.store.GetTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	if tenant.Enabled == enabled {
+		return nil
+	}
+
+	if !enabled {
+		if err := s.net.Destroy(tenantID); err != nil {
+			return fmt.Errorf("app: disabling tenant %q: %w", tenant.Name, err)
+		}
+		if err := s.store.SetTenantEnabled(ctx, tenantID, false); err != nil {
+			return err
+		}
+		return s.syncHostForwarding(ctx)
+	}
+
+	subnet, err := ipam.ParseSubnet(tenant.Subnet)
+	if err != nil {
+		return err
+	}
+	if err := s.store.SetTenantEnabled(ctx, tenantID, true); err != nil {
+		return err
+	}
+	tenant.Enabled = true
+	if err := s.bringUpTenant(ctx, tenant, subnet); err != nil {
+		_ = s.store.SetTenantEnabled(ctx, tenantID, false) // it didn't actually come up
+		return fmt.Errorf("app: enabling tenant %q: %w", tenant.Name, err)
+	}
+	return nil
+}
+
+// SetTenantIsolationExceptions replaces a tenant's isolation-exception list
+// (destination IPs/CIDRs that stay reachable despite IsolatePeers) and
+// re-applies its firewall immediately. Validates every entry before
+// touching storage, and rolls the stored value back if applying the new
+// firewall fails.
+func (s *Service) SetTenantIsolationExceptions(ctx context.Context, tenantID int64, exceptions string) error {
+	parsed, err := parseExceptions(exceptions)
+	if err != nil {
+		return err
+	}
+	tenant, err := s.store.GetTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	subnet, err := ipam.ParseSubnet(tenant.Subnet)
+	if err != nil {
+		return err
+	}
+
+	previous := tenant.IsolationExceptions
+	if err := s.store.SetTenantIsolationExceptions(ctx, tenantID, exceptions); err != nil {
+		return err
+	}
+	if !tenant.Enabled {
+		return nil // nothing live to re-apply to; it'll pick this up when enabled
+	}
+	spec := netns.FirewallSpec{WGSubnet: subnet, IsolatePeers: tenant.IsolatePeers, Exceptions: parsed}
+	if err := s.net.ApplyFirewall(tenantID, spec); err != nil {
+		_ = s.store.SetTenantIsolationExceptions(ctx, tenantID, previous)
+		return fmt.Errorf("app: applying firewall exceptions for tenant %q: %w", tenant.Name, err)
+	}
+	return nil
+}
+
+// PeerStats returns live connection stats (handshake time, bytes
+// transferred) for every peer currently on a tenant's WireGuard interface,
+// keyed by public key. It's a direct kernel read — nothing here is stored.
+func (s *Service) PeerStats(tenantID int64) (map[string]netns.PeerStat, error) {
+	return s.net.PeerStats(tenantID)
 }

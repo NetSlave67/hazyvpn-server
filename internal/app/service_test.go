@@ -21,9 +21,12 @@ type fakeNet struct {
 	destroyCalls  []int64
 	syncCalls     []int64
 	firewallCalls []int64
+	firewallSpecs []netns.FirewallSpec // specs passed to ApplyFirewall, same order as firewallCalls
 	hostSyncs     [][]netns.HostTenantPort
 	failMethod    string
 	existing      map[int64]bool // tenants whose namespace Exists should report true
+	stats         map[string]netns.PeerStat
+	statsErr      error
 }
 
 func (f *fakeNet) EnsureHostForwarding() error { return nil }
@@ -58,6 +61,7 @@ func (f *fakeNet) SyncWireGuard(tenantID int64, configText string) error {
 
 func (f *fakeNet) ApplyFirewall(tenantID int64, spec netns.FirewallSpec) error {
 	f.firewallCalls = append(f.firewallCalls, tenantID)
+	f.firewallSpecs = append(f.firewallSpecs, spec)
 	if f.failMethod == "ApplyFirewall" {
 		return fmt.Errorf("fakeNet: injected ApplyFirewall failure")
 	}
@@ -67,6 +71,13 @@ func (f *fakeNet) ApplyFirewall(tenantID int64, spec netns.FirewallSpec) error {
 func (f *fakeNet) SyncHostPortForwarding(tenants []netns.HostTenantPort) error {
 	f.hostSyncs = append(f.hostSyncs, tenants)
 	return nil
+}
+
+func (f *fakeNet) PeerStats(tenantID int64) (map[string]netns.PeerStat, error) {
+	if f.statsErr != nil {
+		return nil, f.statsErr
+	}
+	return f.stats, nil
 }
 
 func newTestService(t *testing.T, net *fakeNet) (*Service, *store.Store) {
@@ -391,6 +402,292 @@ func TestReconcileRecreatesMissingNamespacesOnly(t *testing.T) {
 	}
 	if len(fn.firewallCalls) != 2 {
 		t.Fatalf("expected firewall rules to be reapplied for both tenants, got %d calls", len(fn.firewallCalls))
+	}
+}
+
+func TestSetTenantEnabledFalseDestroysNamespaceAndExcludesFromForwarding(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+
+	if err := svc.SetTenantEnabled(ctx, tenant.ID, false); err != nil {
+		t.Fatalf("SetTenantEnabled(false): %v", err)
+	}
+	if len(fn.destroyCalls) != 1 || fn.destroyCalls[0] != tenant.ID {
+		t.Fatalf("expected Destroy to be called for tenant %d, got %v", tenant.ID, fn.destroyCalls)
+	}
+	got, err := st.GetTenant(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("GetTenant: %v", err)
+	}
+	if got.Enabled {
+		t.Fatal("expected tenant to be disabled in storage")
+	}
+	lastHostSync := fn.hostSyncs[len(fn.hostSyncs)-1]
+	for _, p := range lastHostSync {
+		if p.TenantID == tenant.ID {
+			t.Fatalf("expected disabled tenant to be excluded from host forwarding, found %+v", p)
+		}
+	}
+}
+
+func TestSetTenantEnabledFalseRollsBackOnDestroyFailure(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+
+	fn.failMethod = "Destroy"
+	if err := svc.SetTenantEnabled(ctx, tenant.ID, false); err == nil {
+		t.Fatal("expected SetTenantEnabled(false) to surface the Destroy failure")
+	}
+	got, err := st.GetTenant(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("GetTenant: %v", err)
+	}
+	if !got.Enabled {
+		t.Fatal("tenant must remain enabled in storage when the namespace could not actually be torn down")
+	}
+}
+
+func TestSetTenantEnabledTrueBringsNamespaceBackUpUnchanged(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	originalPublicKey := tenant.ServerPublicKey
+
+	if err := svc.SetTenantEnabled(ctx, tenant.ID, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	fn.createCalls = nil
+	if err := svc.SetTenantEnabled(ctx, tenant.ID, true); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	if len(fn.createCalls) != 1 || fn.createCalls[0] != tenant.ID {
+		t.Fatalf("expected Create to be called once for the re-enabled tenant, got %v", fn.createCalls)
+	}
+	got, err := st.GetTenant(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("GetTenant: %v", err)
+	}
+	if !got.Enabled {
+		t.Fatal("expected tenant to be enabled again in storage")
+	}
+	if got.ServerPublicKey != originalPublicKey {
+		t.Fatalf("re-enabling must not regenerate keys: got %q, want %q", got.ServerPublicKey, originalPublicKey)
+	}
+}
+
+func TestSetTenantEnabledIsIdempotent(t *testing.T) {
+	fn := &fakeNet{}
+	svc, _ := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	fn.createCalls = nil
+	if err := svc.SetTenantEnabled(ctx, tenant.ID, true); err != nil {
+		t.Fatalf("SetTenantEnabled(true) on an already-enabled tenant: %v", err)
+	}
+	if len(fn.createCalls) != 0 {
+		t.Fatalf("expected no namespace churn for a no-op enable, got %v", fn.createCalls)
+	}
+}
+
+func TestSetPeerEnabledExcludesFromLiveConfig(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	peer, err := svc.AddPeer(ctx, AddPeerParams{TenantID: tenant.ID, Name: "alice"})
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	originalPrivateKey := peer.PrivateKey
+
+	if err := svc.SetPeerEnabled(ctx, tenant.ID, peer.ID, false); err != nil {
+		t.Fatalf("SetPeerEnabled(false): %v", err)
+	}
+	got, err := st.GetPeer(ctx, peer.ID)
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if got.Enabled {
+		t.Fatal("expected peer to be disabled in storage")
+	}
+	if got.PrivateKey != originalPrivateKey {
+		t.Fatal("disabling a peer must not touch its keys")
+	}
+
+	if err := svc.SetPeerEnabled(ctx, tenant.ID, peer.ID, true); err != nil {
+		t.Fatalf("SetPeerEnabled(true): %v", err)
+	}
+	got, err = st.GetPeer(ctx, peer.ID)
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if !got.Enabled {
+		t.Fatal("expected peer to be re-enabled in storage")
+	}
+	if got.PrivateKey != originalPrivateKey {
+		t.Fatal("re-enabling a peer must not regenerate its keys")
+	}
+}
+
+func TestSetTenantIsolationExceptionsValidatesBeforeStoring(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820, IsolatePeers: true})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+
+	if err := svc.SetTenantIsolationExceptions(ctx, tenant.ID, "not-an-ip"); err == nil {
+		t.Fatal("expected a garbage exception entry to be rejected")
+	}
+	got, err := st.GetTenant(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("GetTenant: %v", err)
+	}
+	if got.IsolationExceptions != "" {
+		t.Fatalf("a rejected exceptions update must not be stored, got %q", got.IsolationExceptions)
+	}
+}
+
+func TestSetTenantIsolationExceptionsAppliesToLiveFirewall(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820, IsolatePeers: true})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+
+	if err := svc.SetTenantIsolationExceptions(ctx, tenant.ID, "10.8.0.5"); err != nil {
+		t.Fatalf("SetTenantIsolationExceptions: %v", err)
+	}
+	got, err := st.GetTenant(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("GetTenant: %v", err)
+	}
+	if got.IsolationExceptions != "10.8.0.5" {
+		t.Fatalf("IsolationExceptions = %q, want %q", got.IsolationExceptions, "10.8.0.5")
+	}
+	lastSpec := fn.firewallSpecs[len(fn.firewallSpecs)-1]
+	if len(lastSpec.Exceptions) != 1 || lastSpec.Exceptions[0].String() != "10.8.0.5/32" {
+		t.Fatalf("expected the applied firewall spec to carry the new exception, got %+v", lastSpec.Exceptions)
+	}
+}
+
+func TestSetTenantIsolationExceptionsRollsBackOnApplyFailure(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820, IsolatePeers: true})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+
+	fn.failMethod = "ApplyFirewall"
+	if err := svc.SetTenantIsolationExceptions(ctx, tenant.ID, "10.8.0.5"); err == nil {
+		t.Fatal("expected the ApplyFirewall failure to surface")
+	}
+	got, err := st.GetTenant(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("GetTenant: %v", err)
+	}
+	if got.IsolationExceptions != "" {
+		t.Fatalf("expected the exceptions update to be rolled back, got %q", got.IsolationExceptions)
+	}
+}
+
+func TestReconcileSkipsDisabledTenants(t *testing.T) {
+	fn := &fakeNet{}
+	svc, _ := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	if err := svc.SetTenantEnabled(ctx, tenant.ID, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	fn.createCalls = nil
+	fn.syncCalls = nil
+	fn.firewallCalls = nil
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(fn.createCalls) != 0 || len(fn.syncCalls) != 0 || len(fn.firewallCalls) != 0 {
+		t.Fatalf("expected Reconcile to skip a disabled tenant entirely, got create=%v sync=%v firewall=%v",
+			fn.createCalls, fn.syncCalls, fn.firewallCalls)
+	}
+}
+
+// TestReconcileTearsDownStaleNamespaceForDisabledTenant covers a disabled
+// tenant whose namespace is still (unexpectedly) up — e.g. a previous
+// disable's Destroy call silently failed, or state was edited directly in
+// the database. Reconcile should notice and finish the job rather than
+// leaving a supposedly-disabled tenant quietly still serving traffic.
+func TestReconcileTearsDownStaleNamespaceForDisabledTenant(t *testing.T) {
+	fn := &fakeNet{}
+	svc, _ := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	if err := svc.SetTenantEnabled(ctx, tenant.ID, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	fn.destroyCalls = nil
+	fn.existing = map[int64]bool{tenant.ID: true} // simulate the namespace somehow still being up
+
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(fn.destroyCalls) != 1 || fn.destroyCalls[0] != tenant.ID {
+		t.Fatalf("expected Reconcile to destroy the stale namespace of a disabled tenant, got %v", fn.destroyCalls)
+	}
+}
+
+func TestPeerStatsPassesThroughToNetManager(t *testing.T) {
+	fn := &fakeNet{stats: map[string]netns.PeerStat{"abc": {RxBytes: 42}}}
+	svc, _ := newTestService(t, fn)
+
+	stats, err := svc.PeerStats(1)
+	if err != nil {
+		t.Fatalf("PeerStats: %v", err)
+	}
+	if stats["abc"].RxBytes != 42 {
+		t.Fatalf("PeerStats = %+v, want RxBytes 42", stats)
 	}
 }
 

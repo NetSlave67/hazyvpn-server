@@ -13,6 +13,13 @@ import (
 type FirewallSpec struct {
 	WGSubnet     *net.IPNet // the tenant's WireGuard subnet, e.g. 10.8.0.0/24
 	IsolatePeers bool       // drop peer-to-peer traffic within WGSubnet
+	// Exceptions are destination addresses that stay reachable even when
+	// IsolatePeers is set — e.g. a shared jump host or file server that
+	// every road-warrior should still be able to reach in an otherwise
+	// zero-trust (peer-isolated) tenant. Each must already be a specific
+	// host or subnet the operator wants reachable; nil/empty means no
+	// exceptions.
+	Exceptions []*net.IPNet
 }
 
 // Ruleset renders the nftables ruleset text for spec, suitable for feeding
@@ -32,7 +39,11 @@ type FirewallSpec struct {
 // related return traffic, and — when IsolatePeers is set — drop new
 // connections between two addresses that are both inside the tenant's own
 // WireGuard subnet, since WireGuard's AllowedIPs alone does not stop
-// road-warriors from reaching each other through the server.
+// road-warriors from reaching each other through the server. Exceptions are
+// placed *before* that drop rule — nftables evaluates rules in order within
+// a chain, so a destination matched by an exception's accept rule never
+// reaches the isolation drop rule at all, regardless of which peer it came
+// from.
 func Ruleset(spec FirewallSpec) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "add table inet hazyvpn\n")
@@ -41,6 +52,11 @@ func Ruleset(spec FirewallSpec) string {
 	fmt.Fprintf(&b, "  chain forward {\n")
 	fmt.Fprintf(&b, "    type filter hook forward priority 0; policy drop;\n")
 	fmt.Fprintf(&b, "    ct state established,related accept\n")
+	if spec.IsolatePeers {
+		for _, exc := range spec.Exceptions {
+			fmt.Fprintf(&b, "    ip daddr %s accept\n", exc)
+		}
+	}
 	if spec.IsolatePeers && spec.WGSubnet != nil {
 		fmt.Fprintf(&b, "    ip saddr %s ip daddr %s ct state new drop\n", spec.WGSubnet, spec.WGSubnet)
 	}

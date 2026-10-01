@@ -29,6 +29,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.message = ""
 		return m, nil
 
+	case statsTickMsg:
+		if t := m.selectedTenant(); t != nil {
+			return m, tea.Batch(fetchPeerStats(m.svc, t.ID), statsTick())
+		}
+		return m, statsTick()
+
+	case peerStatsMsg:
+		if t := m.selectedTenant(); t != nil && t.ID == msg.tenantID && msg.err == nil {
+			m.peerStats = msg.stats
+		}
+		return m, nil
+
+	case toggleTenantEnabledMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.setMessage(errorStyle.Render("Could not change tenant state: " + msg.err.Error()))
+			return m, clearMessageAfter(messageTTL)
+		}
+		m.setMessage(activeStyle.Render("Tenant state updated"))
+		return m, tea.Batch(loadTenants(m.svc), clearMessageAfter(messageTTL))
+
+	case togglePeerEnabledMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.setMessage(errorStyle.Render("Could not change peer state: " + msg.err.Error()))
+			return m, clearMessageAfter(messageTTL)
+		}
+		m.setMessage(activeStyle.Render("Peer state updated"))
+		if t := m.selectedTenant(); t != nil {
+			return m, tea.Batch(loadPeers(m.svc, t.ID), clearMessageAfter(messageTTL))
+		}
+		return m, clearMessageAfter(messageTTL)
+
+	case exceptionsUpdatedMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.setMessage(errorStyle.Render("Could not update exceptions: " + msg.err.Error()))
+			return m, clearMessageAfter(messageTTL)
+		}
+		m.setMessage(activeStyle.Render("Isolation exceptions updated"))
+		return m, tea.Batch(loadTenants(m.svc), clearMessageAfter(messageTTL))
+
 	case tenantsLoadedMsg:
 		return m.onTenantsLoaded(msg)
 	case peersLoadedMsg:
@@ -121,7 +163,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case modalViewText:
 		m.modal = modalNone
 		return m, nil
-	case modalPromptEmail, modalPromptImportPeer, modalPromptImportTenant:
+	case modalPromptEmail, modalPromptImportPeer, modalPromptImportTenant, modalPromptExceptions:
 		return m.updatePrompt(msg)
 	}
 	return m.handleNormalKey(msg)
@@ -170,6 +212,10 @@ func (m model) handleNormalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.startImportPrompt()
 	case key.Matches(msg, m.keys.Email):
 		return m.startEmailPrompt()
+	case key.Matches(msg, m.keys.Toggle):
+		return m.startToggle()
+	case key.Matches(msg, m.keys.Exceptions):
+		return m.startExceptionsPrompt()
 	}
 	return m, nil
 }

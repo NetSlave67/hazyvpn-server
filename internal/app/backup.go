@@ -34,6 +34,7 @@ func (s *Service) ExportTenantBackup(ctx context.Context, tenantID int64) ([]byt
 			ServerPrivateKey: tenant.ServerPrivateKey, ServerPublicKey: tenant.ServerPublicKey,
 			DNS: tenant.DNS, AllowedIPs: tenant.AllowedIPs, Keepalive: tenant.Keepalive,
 			PSKRequired: tenant.PSKRequired, IsolatePeers: tenant.IsolatePeers,
+			IsolationExceptions: tenant.IsolationExceptions,
 		},
 	}
 	for _, p := range peers {

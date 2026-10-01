@@ -103,6 +103,34 @@ func importTenant(svc *app.Service, path, newName string, newListenPort int) tea
 	}
 }
 
+func fetchPeerStats(svc *app.Service, tenantID int64) tea.Cmd {
+	return func() tea.Msg {
+		stats, err := svc.PeerStats(tenantID)
+		return peerStatsMsg{tenantID: tenantID, stats: stats, err: err}
+	}
+}
+
+func toggleTenantEnabled(svc *app.Service, tenantID int64, enabled bool) tea.Cmd {
+	return func() tea.Msg {
+		err := svc.SetTenantEnabled(bgCtx, tenantID, enabled)
+		return toggleTenantEnabledMsg{tenantID: tenantID, err: err}
+	}
+}
+
+func togglePeerEnabled(svc *app.Service, tenantID, peerID int64, enabled bool) tea.Cmd {
+	return func() tea.Msg {
+		err := svc.SetPeerEnabled(bgCtx, tenantID, peerID, enabled)
+		return togglePeerEnabledMsg{peerID: peerID, err: err}
+	}
+}
+
+func updateExceptions(svc *app.Service, tenantID int64, exceptions string) tea.Cmd {
+	return func() tea.Msg {
+		err := svc.SetTenantIsolationExceptions(bgCtx, tenantID, exceptions)
+		return exceptionsUpdatedMsg{err: err}
+	}
+}
+
 func suggestTenantDefaults(svc *app.Service) tea.Cmd {
 	return func() tea.Msg {
 		subnet, err := svc.SuggestSubnet(bgCtx)

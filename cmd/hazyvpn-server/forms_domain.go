@@ -17,6 +17,7 @@ func newTenantFormModel(subnet string, port int) *form {
 	f.addText("Keepalive", "seconds", "25")
 	f.addToggle("Preshared Key", "default on for new peers", true)
 	f.addToggle("Isolate Peers", "block peers from reaching each other", true)
+	f.addText("Isolation Exceptions", "optional, comma-separated IPs/CIDRs reachable despite isolation", "")
 	f.focusField()
 	return f
 }
@@ -38,13 +39,14 @@ func tenantParamsFromForm(f *form) (app.CreateTenantParams, error) {
 		}
 	}
 	return app.CreateTenantParams{
-		Name:         name,
-		Subnet:       f.value("Subnet"),
-		ListenPort:   port,
-		DNS:          f.value("DNS"),
-		Keepalive:    keepalive,
-		PSKRequired:  f.toggle("Preshared Key"),
-		IsolatePeers: f.toggle("Isolate Peers"),
+		Name:                name,
+		Subnet:              f.value("Subnet"),
+		ListenPort:          port,
+		DNS:                 f.value("DNS"),
+		Keepalive:           keepalive,
+		PSKRequired:         f.toggle("Preshared Key"),
+		IsolatePeers:        f.toggle("Isolate Peers"),
+		IsolationExceptions: f.value("Isolation Exceptions"),
 	}, nil
 }
 

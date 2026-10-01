@@ -154,11 +154,12 @@ path with HAZYVPN_CONFIG) with environment variable overrides — see
 instructions/architecture.md for details.
 
 Keys (inside the TUI):
-  j/k, ↑/↓   move          tab   switch pane
-  n          new tenant    a     add peer
-  x          delete        v     view config
-  g          show QR       c     copy to clipboard
-  d          export        i     import
-  e          email config  ?     help
-  q          quit`)
+  j/k, ↑/↓   move             tab   switch pane
+  n          new tenant       a     add peer
+  x          delete           t     enable/disable
+  v          view config      g     show QR
+  c          copy to clipboard d    export
+  i          import           e     email config
+  o          isolation exceptions
+  ?          help             q     quit`)
 }

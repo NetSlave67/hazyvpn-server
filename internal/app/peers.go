@@ -154,6 +154,26 @@ func (s *Service) RemovePeer(ctx context.Context, tenantID, peerID int64) error 
 	return s.syncTenantWireGuard(ctx, tenant)
 }
 
+// SetPeerEnabled suspends or resumes a single peer without touching its
+// keys or address. A suspended peer is simply left out of the tenant's
+// live WireGuard config — re-enabling re-syncs it back in unchanged, so a
+// config already handed to that user keeps working the moment they're
+// re-enabled.
+func (s *Service) SetPeerEnabled(ctx context.Context, tenantID, peerID int64, enabled bool) error {
+	tenant, err := s.store.GetTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	if err := s.store.SetPeerEnabled(ctx, peerID, enabled); err != nil {
+		return err
+	}
+	if err := s.syncTenantWireGuard(ctx, tenant); err != nil {
+		_ = s.store.SetPeerEnabled(ctx, peerID, !enabled)
+		return err
+	}
+	return nil
+}
+
 func (s *Service) ListPeers(ctx context.Context, tenantID int64) ([]store.Peer, error) {
 	return s.store.ListPeers(ctx, tenantID)
 }

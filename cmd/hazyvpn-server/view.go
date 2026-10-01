@@ -25,7 +25,7 @@ func (m model) render() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.helpView())
 	case modalTenantForm, modalPeerForm:
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.withSpinner(m.form.View()))
-	case modalPromptEmail, modalPromptImportPeer, modalPromptImportTenant:
+	case modalPromptEmail, modalPromptImportPeer, modalPromptImportTenant, modalPromptExceptions:
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.withSpinner(m.prompt.View()))
 	case modalConfirmDeleteTenant:
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.confirmView(
@@ -114,14 +114,17 @@ func (m model) tenantsPane(height int) string {
 	}
 	for i, t := range m.tenants {
 		line := fmt.Sprintf("%s · %s · :%d", t.Name, t.Subnet, t.ListenPort)
+		if !t.Enabled {
+			line += " · disabled"
+		}
 		if i == m.tenantCursor {
-			marker := "› "
 			if m.pane == paneTenants {
-				marker = inputPromptStyle.Render("› ")
+				b.WriteString(inputPromptStyle.Render("› ") + selectedNameStyle.Render(line) + "\n")
 			} else {
-				marker = dimStyle.Render("› ")
+				b.WriteString(dimStyle.Render("› ") + inactiveSelectedStyle.Render(line) + "\n")
 			}
-			b.WriteString(marker + selectedNameStyle.Render(line) + "\n")
+		} else if !t.Enabled {
+			b.WriteString("  " + dimStyle.Render(line) + "\n")
 		} else {
 			b.WriteString("  " + itemStyle.Render(line) + "\n")
 		}
@@ -148,18 +151,27 @@ func (m model) peersPane(height int) string {
 			b.WriteString(dimStyle.Render("No peers yet — press a to add one.\n"))
 		}
 		for i, p := range m.peers {
-			key := p.PublicKey
-			if len(key) > 12 {
-				key = key[:12] + "…"
-			}
-			line := fmt.Sprintf("%s · %s · %s", p.Name, p.Address, key)
-			if i == m.peerCursor {
-				marker := dimStyle.Render("› ")
-				if m.pane == panePeers {
-					marker = inputPromptStyle.Render("› ")
+			dot := dimStyle.Render("○")
+			handshake := "never"
+			if p.Enabled {
+				if stat, ok := m.peerStats[p.PublicKey]; ok {
+					handshake = formatHandshake(stat.LastHandshake)
+					if stat.Connected() {
+						dot = activeStyle.Render("●")
+					}
 				}
-				b.WriteString(marker + selectedNameStyle.Render(line) + "\n")
 			} else {
+				handshake = "disabled"
+			}
+			line := fmt.Sprintf("%s %s · %s · %s", dot, p.Name, p.Address, handshake)
+			switch {
+			case i == m.peerCursor && m.pane == panePeers:
+				b.WriteString(inputPromptStyle.Render("› ") + selectedNameStyle.Render(line) + "\n")
+			case i == m.peerCursor:
+				b.WriteString(dimStyle.Render("› ") + inactiveSelectedStyle.Render(line) + "\n")
+			case !p.Enabled:
+				b.WriteString("  " + dimStyle.Render(line) + "\n")
+			default:
 				b.WriteString("  " + itemStyle.Render(line) + "\n")
 			}
 		}

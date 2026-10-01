@@ -20,23 +20,24 @@ var (
 
 // Style variables — set by initStyles().
 var (
-	titleStyle        lipgloss.Style
-	itemStyle         lipgloss.Style
-	selectedNameStyle lipgloss.Style
-	dimItemStyle      lipgloss.Style
-	labelStyle        lipgloss.Style
-	valueStyle        lipgloss.Style
-	activeStyle       lipgloss.Style
-	errorStyle        lipgloss.Style
-	warnStyle         lipgloss.Style
-	dimStyle          lipgloss.Style
-	paneStyle         lipgloss.Style
-	activePaneStyle   lipgloss.Style
-	helpOverlayStyle  lipgloss.Style
-	helpTitleStyle    lipgloss.Style
-	inputPromptStyle  lipgloss.Style
-	spinnerStyle      lipgloss.Style
-	statusBarStyle    lipgloss.Style
+	titleStyle            lipgloss.Style
+	itemStyle             lipgloss.Style
+	selectedNameStyle     lipgloss.Style
+	inactiveSelectedStyle lipgloss.Style
+	dimItemStyle          lipgloss.Style
+	labelStyle            lipgloss.Style
+	valueStyle            lipgloss.Style
+	activeStyle           lipgloss.Style
+	errorStyle            lipgloss.Style
+	warnStyle             lipgloss.Style
+	dimStyle              lipgloss.Style
+	paneStyle             lipgloss.Style
+	activePaneStyle       lipgloss.Style
+	helpOverlayStyle      lipgloss.Style
+	helpTitleStyle        lipgloss.Style
+	inputPromptStyle      lipgloss.Style
+	spinnerStyle          lipgloss.Style
+	statusBarStyle        lipgloss.Style
 )
 
 func initStyles() {
@@ -49,6 +50,14 @@ func initStyles() {
 
 	selectedNameStyle = lipgloss.NewStyle().
 		Foreground(accent).
+		Bold(true)
+
+	// inactiveSelectedStyle marks "this is where your cursor will be if you
+	// switch back to this pane" — deliberately much less prominent than
+	// selectedNameStyle, so there's only ever one clearly "live" selection
+	// on screen at a time instead of both panes looking equally focused.
+	inactiveSelectedStyle = lipgloss.NewStyle().
+		Foreground(dimCol).
 		Bold(true)
 
 	dimItemStyle = lipgloss.NewStyle().

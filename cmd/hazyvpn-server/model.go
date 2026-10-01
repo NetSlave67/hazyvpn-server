@@ -8,8 +8,14 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"hazyvpn-server/internal/app"
+	"hazyvpn-server/internal/netns"
 	"hazyvpn-server/internal/store"
 )
+
+// statsRefreshInterval controls how often live peer stats (handshake time,
+// transfer counters) are re-read from the kernel while the dashboard is
+// visible — frequent enough to feel live, cheap enough not to matter.
+const statsRefreshInterval = 3 * time.Second
 
 type pane int
 
@@ -31,6 +37,7 @@ const (
 	modalPromptEmail
 	modalPromptImportPeer
 	modalPromptImportTenant
+	modalPromptExceptions
 )
 
 type model struct {
@@ -49,6 +56,11 @@ type model struct {
 	prompt   *form // single-field form reused for email/import path prompts
 	viewText string
 	viewKind string // "Config" or "QR" — used as the view modal's heading
+
+	// peerStats holds the live stats for the currently selected tenant's
+	// peers, keyed by public key. Refreshed whenever peers (re)load and on
+	// a periodic tick while the dashboard is visible.
+	peerStats map[string]netns.PeerStat
 
 	keys keyMap
 	help help.Model
@@ -75,7 +87,13 @@ func newModel(svc *app.Service, publicHost, exportDir string) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return loadTenants(m.svc)
+	return tea.Batch(loadTenants(m.svc), statsTick())
+}
+
+type statsTickMsg time.Time
+
+func statsTick() tea.Cmd {
+	return tea.Tick(statsRefreshInterval, func(t time.Time) tea.Msg { return statsTickMsg(t) })
 }
 
 func (m *model) setMessage(s string) {

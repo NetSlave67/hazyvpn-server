@@ -4,6 +4,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"hazyvpn-server/internal/netns"
 	"hazyvpn-server/internal/store"
 )
 
@@ -96,6 +97,30 @@ type tenantDefaultsMsg struct {
 type peerDefaultsMsg struct {
 	address string
 	err     error
+}
+
+// peerStatsMsg carries live stats for one tenant's peers. A non-nil err
+// (e.g. the tenant is disabled, so its namespace doesn't exist) is treated
+// as "no stats available" rather than shown as an error — it's an entirely
+// expected condition, not a failure.
+type peerStatsMsg struct {
+	tenantID int64
+	stats    map[string]netns.PeerStat
+	err      error
+}
+
+type toggleTenantEnabledMsg struct {
+	tenantID int64
+	err      error
+}
+
+type togglePeerEnabledMsg struct {
+	peerID int64
+	err    error
+}
+
+type exceptionsUpdatedMsg struct {
+	err error
 }
 
 type clearMessageMsg struct{}

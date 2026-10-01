@@ -33,7 +33,7 @@ func (m model) onPeersLoaded(msg peersLoadedMsg) (tea.Model, tea.Cmd) {
 	}
 	m.peers = msg.peers
 	m.clampCursors()
-	return m, nil
+	return m, fetchPeerStats(m.svc, msg.tenantID)
 }
 
 func (m model) onTenantDefaults(msg tenantDefaultsMsg) (tea.Model, tea.Cmd) {
@@ -273,6 +273,17 @@ func (m model) updatePrompt(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.modal, m.prompt = modalNone, nil
 		m.busy = true
 		return m, tea.Batch(importTenant(m.svc, path, newName, newPort), m.spin.Tick)
+
+	case modalPromptExceptions:
+		t := m.selectedTenant()
+		if t == nil {
+			m.modal, m.prompt = modalNone, nil
+			return m, nil
+		}
+		exceptions := m.prompt.value("Exceptions")
+		m.modal, m.prompt = modalNone, nil
+		m.busy = true
+		return m, tea.Batch(updateExceptions(m.svc, t.ID, exceptions), m.spin.Tick)
 	}
 	return m, nil
 }
@@ -363,5 +374,42 @@ func (m model) startEmailPrompt() (tea.Model, tea.Cmd) {
 	}
 	m.prompt = newPromptForm("Email Config", "To", "recipient email address", "")
 	m.modal = modalPromptEmail
+	return m, nil
+}
+
+// startToggle flips the enabled/disabled state of whatever's selected in
+// the active pane: a tenant (tears its namespace down/back up) or a peer
+// (excludes/re-includes it from the tenant's live WireGuard config).
+func (m model) startToggle() (tea.Model, tea.Cmd) {
+	if m.pane == paneTenants {
+		t := m.selectedTenant()
+		if t == nil {
+			m.setMessage(warnStyle.Render("Select a tenant first"))
+			return m, clearMessageAfter(messageTTL)
+		}
+		m.busy = true
+		return m, tea.Batch(toggleTenantEnabled(m.svc, t.ID, !t.Enabled), m.spin.Tick)
+	}
+	t, p := m.selectedTenant(), m.selectedPeer()
+	if t == nil || p == nil {
+		m.setMessage(warnStyle.Render("Select a peer first"))
+		return m, clearMessageAfter(messageTTL)
+	}
+	m.busy = true
+	return m, tea.Batch(togglePeerEnabled(m.svc, t.ID, p.ID, !p.Enabled), m.spin.Tick)
+}
+
+// startExceptionsPrompt opens the isolation-exceptions editor for the
+// selected tenant (available from either pane — it's always a tenant-level
+// setting), pre-filled with its current value.
+func (m model) startExceptionsPrompt() (tea.Model, tea.Cmd) {
+	t := m.selectedTenant()
+	if t == nil {
+		m.setMessage(warnStyle.Render("Select a tenant first"))
+		return m, clearMessageAfter(messageTTL)
+	}
+	m.prompt = newPromptForm("Isolation Exceptions — "+t.Name, "Exceptions",
+		"comma-separated IPs/CIDRs reachable despite isolation", t.IsolationExceptions)
+	m.modal = modalPromptExceptions
 	return m, nil
 }

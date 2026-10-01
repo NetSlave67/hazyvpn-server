@@ -295,3 +295,31 @@ the migration fix, not just unit-tested:
   peers with no real connection yet.
 - Empty-selection warnings confirmed for the new `t`/`o` actions, matching
   the existing pattern for every other action.
+
+## Two real bugs found from an actual phone connection (2026-10-02)
+
+Martin connected a real device with full-tunnel AllowedIPs (`0.0.0.0/0`)
+and found two things unit tests couldn't catch (neither involves fake-able
+logic — both only show up against a real kernel and a real client):
+
+1. **Internet traffic went nowhere past the tenant's own gateway.**
+   Traceroute died at a `169.254.x.x` address — the link-local address
+   `Ruleset`'s postrouting chain MASQUERADEs the WireGuard subnet to before
+   routing out to the container's own namespace. Nothing then re-NATted
+   *that* address before it left the container via Docker's bridge, since
+   Docker's own NAT only covers its bridge subnet. Fixed with a second
+   masquerade in `HostRuleset`'s new postrouting chain
+   (`internal/netns/hostnat.go`). **Lesson for any future double-NAT hop
+   added to this design**: every additional namespace boundary a packet
+   crosses needs its own masquerade rule at that boundary — the previous
+   hop's MASQUERADE only makes the packet valid *up to* the next hop, not
+   beyond it.
+2. **A peer's handshake reset whenever any other peer on the same tenant
+   changed.** `wg setconf` (used by `SyncWireGuard`) tears down and
+   recreates every peer in the file, including unchanged ones. Switched to
+   `wg syncconf`, which diffs first — the same reason wg-quick itself uses
+   syncconf for reloads, not setconf.
+
+Also added: live traffic totals (overall, per-tenant, per-peer) via
+`Service.AllPeerStats`, aggregating the existing per-tenant `PeerStats`
+across every enabled tenant.

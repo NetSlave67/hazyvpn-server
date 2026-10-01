@@ -55,11 +55,16 @@ type ServerPeerSection struct {
 }
 
 // ServerInterfaceConfig holds everything needed to render a tenant's
-// server-side WireGuard interface config (the file that lives inside the
-// tenant's network namespace).
+// server-side WireGuard interface config. This is fed directly to
+// `wg setconf`, not `wg-quick` — unlike PeerConfig, it must stick to the
+// handful of directives the plain wg(8) config parser understands
+// (PrivateKey/ListenPort/FwMark and, per peer, PublicKey/PresharedKey/
+// AllowedIPs/Endpoint/PersistentKeepalive). Address is deliberately not a
+// field here: `wg setconf` rejects it outright ("Line unrecognized"), and
+// the tenant's own address is assigned separately via `ip addr add` when
+// its namespace is created (see netns.Manager.Create).
 type ServerInterfaceConfig struct {
 	PrivateKey string
-	Address    string // e.g. "10.8.0.1/24"
 	ListenPort int
 	Peers      []ServerPeerSection
 }
@@ -70,7 +75,6 @@ func RenderServerConfig(c ServerInterfaceConfig) string {
 	var b strings.Builder
 	b.WriteString("[Interface]\n")
 	fmt.Fprintf(&b, "PrivateKey = %s\n", c.PrivateKey)
-	fmt.Fprintf(&b, "Address = %s\n", c.Address)
 	fmt.Fprintf(&b, "ListenPort = %d\n", c.ListenPort)
 
 	for _, p := range c.Peers {

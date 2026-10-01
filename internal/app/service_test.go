@@ -127,6 +127,35 @@ func TestCreateTenantRollsBackDBRowOnNamespaceFailure(t *testing.T) {
 	}
 }
 
+// TestCreateTenantDestroysNamespaceWhenAStepAfterCreateFails guards against
+// a real bug found in production: Create() itself rolls back its own
+// partial work, but a tenant whose namespace came up fine and then failed
+// a later step (WireGuard sync, firewall, host forwarding) was being left
+// as a live, fully-networked orphan namespace while its DB row got deleted
+// out from under it.
+func TestCreateTenantDestroysNamespaceWhenAStepAfterCreateFails(t *testing.T) {
+	fn := &fakeNet{failMethod: "SyncWireGuard"}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	_, err := svc.CreateTenant(ctx, CreateTenantParams{
+		Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820,
+	})
+	if err == nil {
+		t.Fatal("expected CreateTenant to surface the WireGuard sync failure")
+	}
+	if len(fn.destroyCalls) != 1 {
+		t.Fatalf("expected the namespace to be destroyed after the later step failed, got %d Destroy calls", len(fn.destroyCalls))
+	}
+	tenants, err := st.ListTenants(ctx)
+	if err != nil {
+		t.Fatalf("ListTenants: %v", err)
+	}
+	if len(tenants) != 0 {
+		t.Fatalf("expected the DB row to be rolled back, found %d tenants", len(tenants))
+	}
+}
+
 func TestCreateTenantRejectsDuplicateListenPort(t *testing.T) {
 	fn := &fakeNet{}
 	svc, _ := newTestService(t, fn)

@@ -169,14 +169,24 @@ func (s *Service) CreateTenant(ctx context.Context, p CreateTenantParams) (*stor
 
 // bringUpTenant creates the tenant's namespace, applies its (peerless, at
 // creation time) WireGuard config and firewall rules, and refreshes the
-// host's port-forwarding table to include it.
-func (s *Service) bringUpTenant(ctx context.Context, tenant *store.Tenant, subnet *net.IPNet) error {
+// host's port-forwarding table to include it. Create itself rolls back its
+// own partial work on failure, but a failure in any step *after* Create
+// succeeds would otherwise leave a live, fully-networked namespace behind
+// for a tenant whose database row the caller is about to delete — the
+// defer below is what tears that namespace back down in that case.
+func (s *Service) bringUpTenant(ctx context.Context, tenant *store.Tenant, subnet *net.IPNet) (err error) {
 	ones, _ := subnet.Mask.Size()
 	gatewayCIDR := fmt.Sprintf("%s/%d", ipam.GatewayAddress(subnet), ones)
 
 	if err := s.net.Create(tenant.ID, gatewayCIDR); err != nil {
 		return fmt.Errorf("app: bringing up namespace for tenant %q: %w", tenant.Name, err)
 	}
+	defer func() {
+		if err != nil {
+			_ = s.net.Destroy(tenant.ID)
+		}
+	}()
+
 	if err := s.syncTenantWireGuard(ctx, tenant); err != nil {
 		return err
 	}
@@ -198,13 +208,6 @@ func (s *Service) syncTenantWireGuard(ctx context.Context, tenant *store.Tenant)
 		return fmt.Errorf("app: listing peers for tenant %q: %w", tenant.Name, err)
 	}
 
-	subnet, err := ipam.ParseSubnet(tenant.Subnet)
-	if err != nil {
-		return fmt.Errorf("app: tenant %q has an invalid stored subnet %q: %w", tenant.Name, tenant.Subnet, err)
-	}
-	ones, _ := subnet.Mask.Size()
-	gatewayCIDR := fmt.Sprintf("%s/%d", ipam.GatewayAddress(subnet), ones)
-
 	sections := make([]wgconf.ServerPeerSection, 0, len(peers))
 	for _, p := range peers {
 		sections = append(sections, wgconf.ServerPeerSection{
@@ -217,7 +220,6 @@ func (s *Service) syncTenantWireGuard(ctx context.Context, tenant *store.Tenant)
 
 	cfg := wgconf.RenderServerConfig(wgconf.ServerInterfaceConfig{
 		PrivateKey: tenant.ServerPrivateKey,
-		Address:    gatewayCIDR,
 		ListenPort: tenant.ListenPort,
 		Peers:      sections,
 	})

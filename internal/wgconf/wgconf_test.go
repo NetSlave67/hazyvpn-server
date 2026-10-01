@@ -1,6 +1,9 @@
 package wgconf
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGenerateKeypairProducesDistinctKeys(t *testing.T) {
 	a, err := GenerateKeypair()
@@ -64,7 +67,6 @@ func TestRenderServerConfigWithMultiplePeers(t *testing.T) {
 
 	rendered := RenderServerConfig(ServerInterfaceConfig{
 		PrivateKey: server.Private.String(),
-		Address:    "10.8.0.1/24",
 		ListenPort: 51820,
 		Peers: []ServerPeerSection{
 			{Name: "alice", PublicKey: p1.Public.String(), AllowedIPs: "10.8.0.2/32"},
@@ -81,6 +83,21 @@ func TestRenderServerConfigWithMultiplePeers(t *testing.T) {
 	}
 	if parsed.Peers[1]["AllowedIPs"] != "10.8.0.3/32" {
 		t.Errorf("second peer AllowedIPs mismatch: %q", parsed.Peers[1]["AllowedIPs"])
+	}
+}
+
+// TestRenderServerConfigNeverEmitsAddress guards against regressing the bug
+// found in production: `wg setconf` (unlike `wg-quick`) rejects an Address
+// line in [Interface] with "Line unrecognized" and aborts the whole config
+// apply. The tenant's address is assigned separately via `ip addr add`.
+func TestRenderServerConfigNeverEmitsAddress(t *testing.T) {
+	server, _ := GenerateKeypair()
+	rendered := RenderServerConfig(ServerInterfaceConfig{
+		PrivateKey: server.Private.String(),
+		ListenPort: 51820,
+	})
+	if strings.Contains(rendered, "Address") {
+		t.Fatalf("RenderServerConfig must never emit an Address line (wg setconf rejects it):\n%s", rendered)
 	}
 }
 

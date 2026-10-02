@@ -323,3 +323,35 @@ logic — both only show up against a real kernel and a real client):
 Also added: live traffic totals (overall, per-tenant, per-peer) via
 `Service.AllPeerStats`, aggregating the existing per-tenant `PeerStats`
 across every enabled tenant.
+
+## Per-peer SDN-style routing — a real design gap, not just a feature (2026-10-02)
+
+Martin asked how to edit a peer's AllowedIPs without recreating it,
+explaining that AllowedIPs on the server's own peer entry is what actually
+populates WireGuard's routing table for that peer — this is correct, and
+exposed that **the server-side per-peer AllowedIPs was hardcoded to the
+peer's own `/32`** (`syncTenantWireGuard` in `internal/app/service.go`),
+never driven by the `AllowedIPs` field the operator could already set in
+the TUI. That field only ever reached the *client's* exported config. So
+the capability Martin assumed existed (route an extra prefix, e.g. a
+subnet behind a peer acting as a gateway, to a specific peer) didn't exist
+at all — nothing to "unlock", it had to be built.
+
+**`RoutedPrefixes` is a deliberately separate new field, not a repurposing
+of `AllowedIPs`.** Reusing the existing field would have been dangerous:
+`AllowedIPs` commonly holds `"0.0.0.0/0, ::/0"` for full-tunnel clients,
+and feeding that into the server's own peer AllowedIPs would make every
+full-tunnel peer a catch-all default route — breaking every other peer's
+connectivity (confirmed by reasoning through WireGuard's longest-prefix-
+match routing before writing any code, not discovered by trial and error).
+`RoutedPrefixes` is additive to the peer's own address, defaults to empty,
+and existing peers are completely unaffected until an operator
+deliberately sets one. Edited via the `r` ("edit routing") screen.
+
+**If `AllowedIPs`/`RoutedPrefixes` semantics are ever touched again**: the
+two fields answer different questions — "what should the *client* tunnel"
+(`AllowedIPs`) vs "what should the *server* route to this specific peer"
+(`RoutedPrefixes`, server's own address always included on top). Don't
+collapse them into one field without re-deriving why that's unsafe (see
+above) — this isn't a stylistic preference, it's the thing that keeps
+multi-peer routing from breaking.

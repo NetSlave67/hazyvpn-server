@@ -30,6 +30,7 @@ type NetManager interface {
 	ApplyFirewall(tenantID int64, spec netns.FirewallSpec) error
 	SyncHostPortForwarding(tenants []netns.HostTenantPort) error
 	PeerStats(tenantID int64) (map[string]netns.PeerStat, error)
+	SyncRoutedPrefixes(tenantID int64, subnet string, prefixes []string) error
 }
 
 // Service implements every tenant/peer operation the TUI exposes.
@@ -297,6 +298,36 @@ func (s *Service) syncTenantWireGuard(ctx context.Context, tenant *store.Tenant)
 	})
 	if err := s.net.SyncWireGuard(tenant.ID, cfg); err != nil {
 		return fmt.Errorf("app: syncing WireGuard config for tenant %q: %w", tenant.Name, err)
+	}
+
+	// WireGuard's own AllowedIPs (set above) only drives its internal
+	// crypto-routing — it adds nothing to the kernel's actual routing
+	// table, which wg syncconf never touches (that's wg-quick's job
+	// normally, and this server doesn't use wg-quick). Without this, a
+	// peer's RoutedPrefixes would show up correctly in `wg show` while the
+	// kernel never actually sent any matching traffic out wg0 at all —
+	// found live. The peers' own addresses need no such route: the
+	// subnet-wide address already assigned to wg0 creates a connected
+	// route covering the whole subnet.
+	routed := map[string]bool{}
+	for _, p := range peers {
+		if !p.Enabled || p.RoutedPrefixes == "" {
+			continue
+		}
+		prefixes, err := parseExceptions(p.RoutedPrefixes)
+		if err != nil {
+			continue // already validated when stored; ignore defensively rather than fail a sync
+		}
+		for _, prefix := range prefixes {
+			routed[prefix.String()] = true
+		}
+	}
+	routedPrefixes := make([]string, 0, len(routed))
+	for prefix := range routed {
+		routedPrefixes = append(routedPrefixes, prefix)
+	}
+	if err := s.net.SyncRoutedPrefixes(tenant.ID, tenant.Subnet, routedPrefixes); err != nil {
+		return fmt.Errorf("app: syncing routed prefixes for tenant %q: %w", tenant.Name, err)
 	}
 	return nil
 }

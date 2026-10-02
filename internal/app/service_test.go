@@ -17,18 +17,19 @@ import (
 // named method, so Service's rollback-on-failure logic can be exercised
 // without root or a real network namespace.
 type fakeNet struct {
-	createCalls   []int64
-	destroyCalls  []int64
-	syncCalls     []int64
-	syncConfigs   []string // rendered config text, same order as syncCalls
-	firewallCalls []int64
-	firewallSpecs []netns.FirewallSpec // specs passed to ApplyFirewall, same order as firewallCalls
-	hostSyncs     [][]netns.HostTenantPort
-	failMethod    string
-	existing      map[int64]bool // tenants whose namespace Exists should report true
-	stats         map[string]netns.PeerStat
-	statsErr      error
-	statsErrFor   map[int64]bool // tenant IDs whose PeerStats call should fail specifically
+	createCalls       []int64
+	destroyCalls      []int64
+	syncCalls         []int64
+	syncConfigs       []string // rendered config text, same order as syncCalls
+	firewallCalls     []int64
+	firewallSpecs     []netns.FirewallSpec // specs passed to ApplyFirewall, same order as firewallCalls
+	hostSyncs         [][]netns.HostTenantPort
+	failMethod        string
+	existing          map[int64]bool // tenants whose namespace Exists should report true
+	stats             map[string]netns.PeerStat
+	statsErr          error
+	statsErrFor       map[int64]bool // tenant IDs whose PeerStats call should fail specifically
+	routedPrefixCalls [][]string     // prefixes passed to each SyncRoutedPrefixes call, in order
 }
 
 func (f *fakeNet) EnsureHostForwarding() error { return nil }
@@ -84,6 +85,14 @@ func (f *fakeNet) PeerStats(tenantID int64) (map[string]netns.PeerStat, error) {
 		return nil, f.statsErr
 	}
 	return f.stats, nil
+}
+
+func (f *fakeNet) SyncRoutedPrefixes(tenantID int64, subnet string, prefixes []string) error {
+	f.routedPrefixCalls = append(f.routedPrefixCalls, prefixes)
+	if f.failMethod == "SyncRoutedPrefixes" {
+		return fmt.Errorf("fakeNet: injected SyncRoutedPrefixes failure")
+	}
+	return nil
 }
 
 func newTestService(t *testing.T, net *fakeNet) (*Service, *store.Store) {
@@ -732,6 +741,72 @@ func TestServerConfigRoutesOwnAddressPlusRoutedPrefixes(t *testing.T) {
 	}
 	if got.AllowedIPs != "0.0.0.0/0, ::/0" {
 		t.Fatalf("client-facing AllowedIPs = %q, want the full-tunnel value unchanged by routing", got.AllowedIPs)
+	}
+}
+
+// TestSyncTenantWireGuardSyncsKernelRoutesForRoutedPrefixes guards a real
+// bug found live: WireGuard's own AllowedIPs (synced above) only drives its
+// internal crypto-routing, never the kernel's actual routing table — that's
+// wg-quick's job normally, which this server never uses. Without an
+// explicit SyncRoutedPrefixes call, a peer's RoutedPrefixes would show up
+// correctly in `wg show` while the kernel never routed a single packet
+// there.
+func TestSyncTenantWireGuardSyncsKernelRoutesForRoutedPrefixes(t *testing.T) {
+	fn := &fakeNet{}
+	svc, _ := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	peer, err := svc.AddPeer(ctx, AddPeerParams{TenantID: tenant.ID, Name: "gateway"})
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+
+	if err := svc.UpdatePeerRouting(ctx, tenant.ID, peer.ID, "0.0.0.0/0", "192.168.50.0/24"); err != nil {
+		t.Fatalf("UpdatePeerRouting: %v", err)
+	}
+	last := fn.routedPrefixCalls[len(fn.routedPrefixCalls)-1]
+	if len(last) != 1 || last[0] != "192.168.50.0/24" {
+		t.Fatalf("expected SyncRoutedPrefixes to be called with [192.168.50.0/24], got %v", last)
+	}
+
+	// Clearing it back out must also sync an empty set, not just skip the
+	// call — otherwise a stale kernel route would be left behind forever.
+	if err := svc.UpdatePeerRouting(ctx, tenant.ID, peer.ID, "0.0.0.0/0", ""); err != nil {
+		t.Fatalf("UpdatePeerRouting (clear): %v", err)
+	}
+	last = fn.routedPrefixCalls[len(fn.routedPrefixCalls)-1]
+	if len(last) != 0 {
+		t.Fatalf("expected SyncRoutedPrefixes to be called with an empty set after clearing, got %v", last)
+	}
+}
+
+func TestSyncTenantWireGuardExcludesDisabledPeersFromRoutedPrefixes(t *testing.T) {
+	fn := &fakeNet{}
+	svc, _ := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	peer, err := svc.AddPeer(ctx, AddPeerParams{TenantID: tenant.ID, Name: "gateway"})
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	if err := svc.UpdatePeerRouting(ctx, tenant.ID, peer.ID, "0.0.0.0/0", "192.168.50.0/24"); err != nil {
+		t.Fatalf("UpdatePeerRouting: %v", err)
+	}
+
+	if err := svc.SetPeerEnabled(ctx, tenant.ID, peer.ID, false); err != nil {
+		t.Fatalf("SetPeerEnabled(false): %v", err)
+	}
+	last := fn.routedPrefixCalls[len(fn.routedPrefixCalls)-1]
+	if len(last) != 0 {
+		t.Fatalf("expected a disabled peer's routed prefixes to be excluded, got %v", last)
 	}
 }
 

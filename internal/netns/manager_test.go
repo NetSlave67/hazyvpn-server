@@ -21,10 +21,18 @@ type fakeRunner struct {
 	calls   []recordedCall
 	failAt  int // -1 means never fail
 	failErr error
+	// outputs maps a joined-args string (see outputKey) to the canned
+	// output Run/RunStdin should return for that exact call, for tests
+	// that need a command's output read back (e.g. `ip route show`).
+	outputs map[string][]byte
 }
 
 func newFakeRunner() *fakeRunner {
 	return &fakeRunner{failAt: -1}
+}
+
+func outputKey(name string, args []string) string {
+	return name + " " + strings.Join(args, " ")
 }
 
 func (f *fakeRunner) Run(name string, args ...string) ([]byte, error) {
@@ -36,7 +44,7 @@ func (f *fakeRunner) RunStdin(name string, stdin string, args ...string) ([]byte
 	if f.failAt == len(f.calls)-1 {
 		return nil, f.failErr
 	}
-	return nil, nil
+	return f.outputs[outputKey(name, args)], nil
 }
 
 func TestCreateIssuesExpectedCommandSequence(t *testing.T) {

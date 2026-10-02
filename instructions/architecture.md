@@ -355,3 +355,19 @@ two fields answer different questions — "what should the *client* tunnel"
 collapse them into one field without re-deriving why that's unsafe (see
 above) — this isn't a stylistic preference, it's the thing that keeps
 multi-peer routing from breaking.
+
+**Follow-up, same day:** shipping `RoutedPrefixes` immediately surfaced the
+next layer of the same lesson — WireGuard's AllowedIPs only drives its
+*internal* crypto-routing, it never touches the kernel's actual routing
+table (that's `wg-quick`'s job normally, via `ip route add` per AllowedIPs
+entry; this server talks to `wg` directly and never runs wg-quick). A
+routed prefix showed up correctly in `wg show` while `ip route` inside the
+namespace showed nothing for it. Fixed with `netns.Manager.
+SyncRoutedPrefixes`, called from `syncTenantWireGuard`, which diffs the
+desired route set against what's actually on `wg0` and adds/removes only
+the difference (excluding the tenant's own connected subnet, which needs
+no explicit route). **Any future field that maps to a WireGuard AllowedIPs
+value needs to ask two separate questions**: does the crypto-routing need
+updating (`wg syncconf`), and does the kernel's actual routing table need
+updating too (`ip route`)? They are not the same operation and nothing
+does the second one for you outside of wg-quick.

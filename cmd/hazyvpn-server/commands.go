@@ -131,6 +131,13 @@ func updateExceptions(svc *app.Service, tenantID int64, exceptions string) tea.C
 	}
 }
 
+func updatePeerRouting(svc *app.Service, tenantID, peerID int64, allowedIPs, routedPrefixes string) tea.Cmd {
+	return func() tea.Msg {
+		err := svc.UpdatePeerRouting(bgCtx, tenantID, peerID, allowedIPs, routedPrefixes)
+		return peerRoutingUpdatedMsg{err: err}
+	}
+}
+
 func suggestTenantDefaults(svc *app.Service) tea.Cmd {
 	return func() tea.Msg {
 		subnet, err := svc.SuggestSubnet(bgCtx)

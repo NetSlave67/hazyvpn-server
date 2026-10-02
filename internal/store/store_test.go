@@ -398,6 +398,39 @@ func TestSetPeerEnabledPersists(t *testing.T) {
 	}
 }
 
+func TestSetPeerRoutingPersistsBothFields(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	tenant, err := s.CreateTenant(ctx, TenantInput{
+		Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820,
+		ServerPrivateKey: "k", ServerPublicKey: "p",
+	})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	peer, err := s.CreatePeer(ctx, PeerInput{
+		TenantID: tenant.ID, Name: "alice", Address: "10.8.0.2",
+		PublicKey: "pub-a", PrivateKey: "priv-a", AllowedIPs: "0.0.0.0/0, ::/0", Keepalive: 25,
+	})
+	if err != nil {
+		t.Fatalf("CreatePeer: %v", err)
+	}
+	if peer.RoutedPrefixes != "" {
+		t.Fatalf("expected RoutedPrefixes to default to empty, got %q", peer.RoutedPrefixes)
+	}
+
+	if err := s.SetPeerRouting(ctx, peer.ID, "10.8.0.0/24", "192.168.50.0/24"); err != nil {
+		t.Fatalf("SetPeerRouting: %v", err)
+	}
+	got, err := s.GetPeer(ctx, peer.ID)
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if got.AllowedIPs != "10.8.0.0/24" || got.RoutedPrefixes != "192.168.50.0/24" {
+		t.Fatalf("got AllowedIPs=%q RoutedPrefixes=%q, want 10.8.0.0/24 / 192.168.50.0/24", got.AllowedIPs, got.RoutedPrefixes)
+	}
+}
+
 func TestSetTenantIsolationExceptionsPersists(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

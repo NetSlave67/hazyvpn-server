@@ -284,6 +284,22 @@ func (m model) updatePrompt(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.modal, m.prompt = modalNone, nil
 		m.busy = true
 		return m, tea.Batch(updateExceptions(m.svc, t.ID, exceptions), m.spin.Tick)
+
+	case modalPromptRouting:
+		t, p := m.selectedTenant(), m.selectedPeer()
+		if t == nil || p == nil {
+			m.modal, m.prompt = modalNone, nil
+			return m, nil
+		}
+		allowedIPs := m.prompt.value("Allowed IPs")
+		if allowedIPs == "" {
+			m.prompt.errMsg = "allowed IPs is required"
+			return m, nil
+		}
+		routedPrefixes := m.prompt.value("Routed Prefixes")
+		m.modal, m.prompt = modalNone, nil
+		m.busy = true
+		return m, tea.Batch(updatePeerRouting(m.svc, t.ID, p.ID, allowedIPs, routedPrefixes), m.spin.Tick)
 	}
 	return m, nil
 }
@@ -411,5 +427,23 @@ func (m model) startExceptionsPrompt() (tea.Model, tea.Cmd) {
 	m.prompt = newPromptForm("Isolation Exceptions — "+t.Name, "Exceptions",
 		"comma-separated IPs/CIDRs reachable despite isolation", t.IsolationExceptions)
 	m.modal = modalPromptExceptions
+	return m, nil
+}
+
+// startRoutingPrompt opens the routing editor for the selected peer: its
+// client-facing AllowedIPs and its server-side RoutedPrefixes, both
+// editable without touching its keys or address.
+func (m model) startRoutingPrompt() (tea.Model, tea.Cmd) {
+	t, p := m.selectedTenant(), m.selectedPeer()
+	if m.pane != panePeers || t == nil || p == nil {
+		m.setMessage(warnStyle.Render("Select a peer first"))
+		return m, clearMessageAfter(messageTTL)
+	}
+	f := newForm("Edit Routing — " + p.Name)
+	f.addText("Allowed IPs", "handed to the client — what it tunnels", p.AllowedIPs)
+	f.addText("Routed Prefixes", "optional — extra subnets the server routes to this peer", p.RoutedPrefixes)
+	f.focusField()
+	m.prompt = f
+	m.modal = modalPromptRouting
 	return m, nil
 }

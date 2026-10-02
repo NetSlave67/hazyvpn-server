@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS peers (
 	private_key     BLOB NOT NULL,
 	preshared_key   BLOB,
 	allowed_ips     TEXT NOT NULL,
+	routed_prefixes TEXT NOT NULL DEFAULT '',
 	dns             TEXT NOT NULL DEFAULT '',
 	keepalive       INTEGER NOT NULL DEFAULT 25,
 	enabled         INTEGER NOT NULL DEFAULT 1,
@@ -66,6 +67,7 @@ var migrations = []string{
 	`ALTER TABLE tenants ADD COLUMN isolation_exceptions TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE tenants ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`,
 	`ALTER TABLE peers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`,
+	`ALTER TABLE peers ADD COLUMN routed_prefixes TEXT NOT NULL DEFAULT ''`,
 }
 
 func isDuplicateColumn(err error) bool {
@@ -288,10 +290,10 @@ func (s *Store) CreatePeer(ctx context.Context, in PeerInput) (*Peer, error) {
 
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO peers (tenant_id, name, address, public_key, private_key, preshared_key,
-			allowed_ips, dns, keepalive, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+			allowed_ips, routed_prefixes, dns, keepalive, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 		in.TenantID, in.Name, in.Address, in.PublicKey, sealedPriv, nullableBytes(sealedPSK),
-		in.AllowedIPs, in.DNS, in.Keepalive,
+		in.AllowedIPs, in.RoutedPrefixes, in.DNS, in.Keepalive,
 	)
 	if err != nil {
 		return nil, friendlyConflictError(err, "a peer", map[string]string{
@@ -316,7 +318,7 @@ func (s *Store) scanPeer(row interface {
 	var enabled int
 	var createdAt time.Time
 	if err := row.Scan(&p.ID, &p.TenantID, &p.Name, &p.Address, &p.PublicKey, &sealedPriv, &sealedPSK,
-		&p.AllowedIPs, &p.DNS, &p.Keepalive, &enabled, &createdAt); err != nil {
+		&p.AllowedIPs, &p.RoutedPrefixes, &p.DNS, &p.Keepalive, &enabled, &createdAt); err != nil {
 		return nil, err
 	}
 	priv, err := s.sealer.OpenString(sealedPriv)
@@ -335,7 +337,7 @@ func (s *Store) scanPeer(row interface {
 }
 
 const peerColumns = `id, tenant_id, name, address, public_key, private_key, preshared_key,
-			allowed_ips, dns, keepalive, enabled, created_at`
+			allowed_ips, routed_prefixes, dns, keepalive, enabled, created_at`
 
 func (s *Store) GetPeer(ctx context.Context, id int64) (*Peer, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+peerColumns+` FROM peers WHERE id = ?`, id)
@@ -385,6 +387,25 @@ func (s *Store) DeletePeer(ctx context.Context, id int64) error {
 // desired state.
 func (s *Store) SetPeerEnabled(ctx context.Context, id int64, enabled bool) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE peers SET enabled = ? WHERE id = ?`, boolToInt(enabled), id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetPeerRouting replaces a peer's client-facing AllowedIPs and
+// server-side RoutedPrefixes in one update — the two fields an "edit peer"
+// flow lets an operator change without recreating the peer.
+func (s *Store) SetPeerRouting(ctx context.Context, id int64, allowedIPs, routedPrefixes string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE peers SET allowed_ips = ?, routed_prefixes = ? WHERE id = ?`,
+		allowedIPs, routedPrefixes, id)
 	if err != nil {
 		return err
 	}

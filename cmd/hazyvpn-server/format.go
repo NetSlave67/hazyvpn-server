@@ -39,3 +39,20 @@ func formatBytes(n int64) string {
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
+
+// formatBitrate renders a bytes-per-second rate as a human bitrate
+// (bits/sec, decimal-scaled — standard networking convention, unlike the
+// binary KiB/MiB used for cumulative byte counts in formatBytes).
+func formatBitrate(bytesPerSec float64) string {
+	bps := bytesPerSec * 8
+	units := [...]string{"bps", "Kbps", "Mbps", "Gbps", "Tbps"}
+	i := 0
+	for bps >= 1000 && i < len(units)-1 {
+		bps /= 1000
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%.0f %s", bps, units[i])
+	}
+	return fmt.Sprintf("%.1f %s", bps, units[i])
+}

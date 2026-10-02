@@ -38,6 +38,7 @@ const (
 	modalPromptImportPeer
 	modalPromptImportTenant
 	modalPromptExceptions
+	modalPromptRouting
 )
 
 type model struct {
@@ -62,7 +63,16 @@ type model struct {
 	// just the selected one) so the dashboard can show both a per-tenant
 	// traffic total in each tenant row and an overall total in the header.
 	// Refreshed whenever peers (re)load and on a periodic tick.
-	allStats map[int64]map[string]netns.PeerStat
+	//
+	// prevStats/prevStatsAt hold the previous snapshot so tenantRate/
+	// overallRate can compute a live bits-per-second rate (the cumulative
+	// counters alone aren't what you want glanceable at the tenant/overall
+	// level — a per-peer cumulative total, shown in the peers pane, is
+	// still exactly what you want there).
+	allStats    map[int64]map[string]netns.PeerStat
+	statsAt     time.Time
+	prevStats   map[int64]map[string]netns.PeerStat
+	prevStatsAt time.Time
 
 	keys keyMap
 	help help.Model
@@ -126,24 +136,40 @@ func (m *model) clampCursors() {
 	}
 }
 
-// tenantTraffic sums live rx/tx across every peer currently known for one
-// tenant. Zero values for a tenant not yet in allStats (never fetched, or
-// disabled) rather than an error — traffic totals are a best-effort display,
-// not a correctness-critical path.
-func (m model) tenantTraffic(tenantID int64) (rx, tx int64) {
-	for _, stat := range m.allStats[tenantID] {
-		rx += stat.RxBytes
-		tx += stat.TxBytes
+// tenantRate returns the live download/upload rate, in bytes per second,
+// for one tenant — the sum, across its peers, of each peer's byte-count
+// delta between the current and previous stats snapshot, divided by the
+// time between them. Zero when there's no previous snapshot yet (first
+// tick after startup/selection) or no elapsed time, rather than a bogus
+// spike or a divide-by-zero.
+func (m model) tenantRate(tenantID int64) (rxBps, txBps float64) {
+	elapsed := m.statsAt.Sub(m.prevStatsAt).Seconds()
+	if elapsed <= 0 {
+		return 0, 0
 	}
-	return rx, tx
+	curr, prev := m.allStats[tenantID], m.prevStats[tenantID]
+	var rxDelta, txDelta int64
+	for key, c := range curr {
+		p, ok := prev[key]
+		if !ok {
+			continue // peer is new since the last sample — nothing to diff against yet
+		}
+		if c.RxBytes > p.RxBytes {
+			rxDelta += c.RxBytes - p.RxBytes
+		}
+		if c.TxBytes > p.TxBytes {
+			txDelta += c.TxBytes - p.TxBytes
+		}
+	}
+	return float64(rxDelta) / elapsed, float64(txDelta) / elapsed
 }
 
-// overallTraffic sums tenantTraffic across every tenant currently known.
-func (m model) overallTraffic() (rx, tx int64) {
+// overallRate sums tenantRate across every tenant currently known.
+func (m model) overallRate() (rxBps, txBps float64) {
 	for tenantID := range m.allStats {
-		r, t := m.tenantTraffic(tenantID)
-		rx += r
-		tx += t
+		r, t := m.tenantRate(tenantID)
+		rxBps += r
+		txBps += t
 	}
-	return rx, tx
+	return rxBps, txBps
 }

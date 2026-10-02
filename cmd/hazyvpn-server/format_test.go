@@ -47,3 +47,21 @@ func TestFormatBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatBitrate(t *testing.T) {
+	cases := []struct {
+		bytesPerSec float64
+		want        string
+	}{
+		{0, "0 bps"},
+		{10, "80 bps"},
+		{125, "1.0 Kbps"}, // 125 B/s = 1000 bps exactly
+		{125_000, "1.0 Mbps"},
+		{125_000_000, "1.0 Gbps"},
+	}
+	for _, c := range cases {
+		if got := formatBitrate(c.bytesPerSec); got != c.want {
+			t.Errorf("formatBitrate(%v) = %q, want %q", c.bytesPerSec, got, c.want)
+		}
+	}
+}

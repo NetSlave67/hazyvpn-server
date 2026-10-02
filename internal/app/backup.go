@@ -41,7 +41,8 @@ func (s *Service) ExportTenantBackup(ctx context.Context, tenantID int64) ([]byt
 		backup.Peers = append(backup.Peers, store.PeerInput{
 			Name: p.Name, Address: p.Address, PublicKey: p.PublicKey,
 			PrivateKey: p.PrivateKey, PresharedKey: p.PresharedKey,
-			AllowedIPs: p.AllowedIPs, DNS: p.DNS, Keepalive: p.Keepalive,
+			AllowedIPs: p.AllowedIPs, RoutedPrefixes: p.RoutedPrefixes,
+			DNS: p.DNS, Keepalive: p.Keepalive,
 		})
 	}
 

@@ -272,11 +272,21 @@ func (s *Service) syncTenantWireGuard(ctx context.Context, tenant *store.Tenant)
 		if !p.Enabled {
 			continue // suspended: excluded from the live interface, keys untouched
 		}
+		// The server always routes the peer's own address to it; its own
+		// RoutedPrefixes add any further destinations on top of that (the
+		// knob that actually makes this peer a gateway for a subnet behind
+		// it). p.AllowedIPs plays no part here — that's what's handed to
+		// the *client* to decide what it tunnels, which is an unrelated
+		// setting the server-side route table must never be driven by.
+		serverAllowedIPs := fmt.Sprintf("%s/32", p.Address)
+		if p.RoutedPrefixes != "" {
+			serverAllowedIPs += ", " + p.RoutedPrefixes
+		}
 		sections = append(sections, wgconf.ServerPeerSection{
 			Name:         p.Name,
 			PublicKey:    p.PublicKey,
 			PresharedKey: p.PresharedKey,
-			AllowedIPs:   fmt.Sprintf("%s/32", p.Address),
+			AllowedIPs:   serverAllowedIPs,
 		})
 	}
 

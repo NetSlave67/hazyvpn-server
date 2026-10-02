@@ -5,7 +5,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION:-docker}" \
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION:-dev}" \
     -o /out/hazyvpn-server ./cmd/hazyvpn-server
 
 FROM alpine:3.22

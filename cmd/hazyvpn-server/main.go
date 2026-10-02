@@ -161,5 +161,6 @@ Keys (inside the TUI):
   c          copy to clipboard d    export
   i          import           e     email config
   o          isolation exceptions
+  r          edit peer routing
   ?          help             q     quit`)
 }

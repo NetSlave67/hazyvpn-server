@@ -55,9 +55,20 @@ type Peer struct {
 	PublicKey    string
 	PrivateKey   string // decrypted on read
 	PresharedKey string // decrypted on read; empty if not used
-	AllowedIPs   string
-	DNS          string
-	Keepalive    int
+	// AllowedIPs is handed to the *client*: what it treats as worth
+	// tunneling (typically "0.0.0.0/0, ::/0" for full-tunnel). It has no
+	// effect on the server's own routing — see RoutedPrefixes for that.
+	AllowedIPs string
+	// RoutedPrefixes are extra CIDRs, comma-separated, added to this
+	// peer's AllowedIPs on the *server's* own WireGuard interface — on top
+	// of its own address, which is always included regardless. This is
+	// what actually makes the server route a given destination prefix to
+	// this peer, e.g. to use it as a gateway into a subnet behind it.
+	// Empty by default: the server routes only the peer's own address to
+	// it, same as if this field didn't exist.
+	RoutedPrefixes string
+	DNS            string
+	Keepalive      int
 	// Enabled is false for a suspended peer: excluded from the tenant's
 	// live WireGuard config (so it can't connect) while its keys and
 	// address are kept exactly as-is for re-enabling later.
@@ -67,13 +78,14 @@ type Peer struct {
 
 // PeerInput is the set of fields needed to create a peer.
 type PeerInput struct {
-	TenantID     int64
-	Name         string
-	Address      string
-	PublicKey    string
-	PrivateKey   string
-	PresharedKey string
-	AllowedIPs   string
-	DNS          string
-	Keepalive    int
+	TenantID       int64
+	Name           string
+	Address        string
+	PublicKey      string
+	PrivateKey     string
+	PresharedKey   string
+	AllowedIPs     string
+	RoutedPrefixes string
+	DNS            string
+	Keepalive      int
 }

@@ -20,6 +20,7 @@ type fakeNet struct {
 	createCalls   []int64
 	destroyCalls  []int64
 	syncCalls     []int64
+	syncConfigs   []string // rendered config text, same order as syncCalls
 	firewallCalls []int64
 	firewallSpecs []netns.FirewallSpec // specs passed to ApplyFirewall, same order as firewallCalls
 	hostSyncs     [][]netns.HostTenantPort
@@ -54,6 +55,7 @@ func (f *fakeNet) Destroy(tenantID int64) error {
 
 func (f *fakeNet) SyncWireGuard(tenantID int64, configText string) error {
 	f.syncCalls = append(f.syncCalls, tenantID)
+	f.syncConfigs = append(f.syncConfigs, configText)
 	if f.failMethod == "SyncWireGuard" {
 		return fmt.Errorf("fakeNet: injected SyncWireGuard failure")
 	}
@@ -692,6 +694,132 @@ func TestPeerStatsPassesThroughToNetManager(t *testing.T) {
 	}
 	if stats["abc"].RxBytes != 42 {
 		t.Fatalf("PeerStats = %+v, want RxBytes 42", stats)
+	}
+}
+
+// TestServerConfigRoutesOwnAddressPlusRoutedPrefixes guards a real design
+// gap found live: the server's own per-peer AllowedIPs used to be
+// hardcoded to the peer's own /32, completely ignoring any per-peer
+// routing the operator might want — there was no way to make the server
+// route an extra prefix (e.g. a subnet behind a peer acting as a gateway)
+// to a specific peer at all. RoutedPrefixes is additive to the peer's own
+// address, never a replacement for it.
+func TestServerConfigRoutesOwnAddressPlusRoutedPrefixes(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	peer, err := svc.AddPeer(ctx, AddPeerParams{TenantID: tenant.ID, Name: "gateway"})
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	if err := svc.UpdatePeerRouting(ctx, tenant.ID, peer.ID, "0.0.0.0/0, ::/0", "192.168.50.0/24"); err != nil {
+		t.Fatalf("UpdatePeerRouting: %v", err)
+	}
+
+	lastConfig := fn.syncConfigs[len(fn.syncConfigs)-1]
+	if !strings.Contains(lastConfig, "10.8.0.2/32, 192.168.50.0/24") {
+		t.Fatalf("expected the peer's own /32 plus its routed prefix in the server config, got:\n%s", lastConfig)
+	}
+
+	got, err := st.GetPeer(ctx, peer.ID)
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if got.AllowedIPs != "0.0.0.0/0, ::/0" {
+		t.Fatalf("client-facing AllowedIPs = %q, want the full-tunnel value unchanged by routing", got.AllowedIPs)
+	}
+}
+
+func TestUpdatePeerRoutingRejectsEmptyAllowedIPs(t *testing.T) {
+	fn := &fakeNet{}
+	svc, _ := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	peer, err := svc.AddPeer(ctx, AddPeerParams{TenantID: tenant.ID, Name: "alice"})
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+
+	if err := svc.UpdatePeerRouting(ctx, tenant.ID, peer.ID, "", "10.0.0.0/8"); err == nil {
+		t.Fatal("expected empty AllowedIPs to be rejected — a peer always needs something to tunnel")
+	}
+}
+
+func TestUpdatePeerRoutingRejectsGarbageRoutedPrefix(t *testing.T) {
+	fn := &fakeNet{}
+	svc, _ := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	peer, err := svc.AddPeer(ctx, AddPeerParams{TenantID: tenant.ID, Name: "alice"})
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+
+	if err := svc.UpdatePeerRouting(ctx, tenant.ID, peer.ID, "0.0.0.0/0", "not-a-cidr"); err == nil {
+		t.Fatal("expected a garbage routed-prefix entry to be rejected")
+	}
+}
+
+func TestUpdatePeerRoutingSkipsResyncWhenOnlyAllowedIPsChanges(t *testing.T) {
+	fn := &fakeNet{}
+	svc, _ := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	peer, err := svc.AddPeer(ctx, AddPeerParams{TenantID: tenant.ID, Name: "alice"})
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	before := len(fn.syncCalls)
+
+	if err := svc.UpdatePeerRouting(ctx, tenant.ID, peer.ID, "10.8.0.0/24", ""); err != nil {
+		t.Fatalf("UpdatePeerRouting: %v", err)
+	}
+	if len(fn.syncCalls) != before {
+		t.Fatalf("expected no WireGuard resync when RoutedPrefixes is unchanged, got %d new calls", len(fn.syncCalls)-before)
+	}
+}
+
+func TestUpdatePeerRoutingRollsBackOnSyncFailure(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	peer, err := svc.AddPeer(ctx, AddPeerParams{TenantID: tenant.ID, Name: "alice"})
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+
+	fn.failMethod = "SyncWireGuard"
+	if err := svc.UpdatePeerRouting(ctx, tenant.ID, peer.ID, "0.0.0.0/0", "192.168.50.0/24"); err == nil {
+		t.Fatal("expected the SyncWireGuard failure to surface")
+	}
+	got, err := st.GetPeer(ctx, peer.ID)
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if got.RoutedPrefixes != "" {
+		t.Fatalf("expected RoutedPrefixes to be rolled back to empty, got %q", got.RoutedPrefixes)
 	}
 }
 

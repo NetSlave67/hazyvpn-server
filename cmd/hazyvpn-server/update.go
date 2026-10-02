@@ -34,7 +34,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case allStatsMsg:
 		if msg.err == nil {
-			m.allStats = msg.stats
+			m.prevStats, m.prevStatsAt = m.allStats, m.statsAt
+			m.allStats, m.statsAt = msg.stats, time.Now()
 		}
 		return m, nil
 
@@ -67,6 +68,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.setMessage(activeStyle.Render("Isolation exceptions updated"))
 		return m, tea.Batch(loadTenants(m.svc), clearMessageAfter(messageTTL))
+
+	case peerRoutingUpdatedMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.setMessage(errorStyle.Render("Could not update routing: " + msg.err.Error()))
+			return m, clearMessageAfter(messageTTL)
+		}
+		m.setMessage(activeStyle.Render("Peer routing updated"))
+		if t := m.selectedTenant(); t != nil {
+			return m, tea.Batch(loadPeers(m.svc, t.ID), clearMessageAfter(messageTTL))
+		}
+		return m, clearMessageAfter(messageTTL)
 
 	case tenantsLoadedMsg:
 		return m.onTenantsLoaded(msg)
@@ -160,7 +173,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case modalViewText:
 		m.modal = modalNone
 		return m, nil
-	case modalPromptEmail, modalPromptImportPeer, modalPromptImportTenant, modalPromptExceptions:
+	case modalPromptEmail, modalPromptImportPeer, modalPromptImportTenant, modalPromptExceptions, modalPromptRouting:
 		return m.updatePrompt(msg)
 	}
 	return m.handleNormalKey(msg)
@@ -213,6 +226,8 @@ func (m model) handleNormalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.startToggle()
 	case key.Matches(msg, m.keys.Exceptions):
 		return m.startExceptionsPrompt()
+	case key.Matches(msg, m.keys.Routing):
+		return m.startRoutingPrompt()
 	}
 	return m, nil
 }

@@ -23,6 +23,7 @@ type keyMap struct {
 	Copy       key.Binding
 	Toggle     key.Binding
 	Exceptions key.Binding
+	Routing    key.Binding
 	Help       key.Binding
 	Quit       key.Binding
 	ForceQuit  key.Binding
@@ -44,6 +45,7 @@ func newKeyMap() keyMap {
 		Copy:       key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy to clipboard")),
 		Toggle:     key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "enable/disable")),
 		Exceptions: key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "isolation exceptions")),
+		Routing:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "edit routing")),
 		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:       key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		ForceQuit:  key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "force quit")),
@@ -58,7 +60,9 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Tab},
 		{k.NewTenant, k.NewPeer, k.Delete, k.Toggle},
-		{k.View, k.QR, k.Copy, k.Export, k.Email, k.Import, k.Exceptions},
+		{k.View, k.QR, k.Copy},
+		{k.Export, k.Email, k.Import},
+		{k.Exceptions, k.Routing},
 		{k.Help, k.Quit, k.ForceQuit},
 	}
 }

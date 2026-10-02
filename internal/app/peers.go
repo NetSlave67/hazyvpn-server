@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 
 	"hazyvpn-server/internal/ipam"
 	"hazyvpn-server/internal/mail"
@@ -176,6 +177,51 @@ func (s *Service) SetPeerEnabled(ctx context.Context, tenantID, peerID int64, en
 
 func (s *Service) ListPeers(ctx context.Context, tenantID int64) ([]store.Peer, error) {
 	return s.store.ListPeers(ctx, tenantID)
+}
+
+// UpdatePeerRouting changes a peer's client-facing AllowedIPs and/or
+// server-side RoutedPrefixes without recreating the peer — its keys and
+// address never change. AllowedIPs must stay non-empty (the client always
+// needs to know what to tunnel); RoutedPrefixes may be cleared back to
+// empty, which just means the server routes nothing but the peer's own
+// address to it.
+func (s *Service) UpdatePeerRouting(ctx context.Context, tenantID, peerID int64, allowedIPs, routedPrefixes string) error {
+	allowedIPs = strings.TrimSpace(allowedIPs)
+	if allowedIPs == "" {
+		return fmt.Errorf("app: allowed IPs is required")
+	}
+	if _, err := parseExceptions(allowedIPs); err != nil {
+		return fmt.Errorf("app: allowed IPs: %w", err)
+	}
+	routedPrefixes = strings.TrimSpace(routedPrefixes)
+	if _, err := parseExceptions(routedPrefixes); err != nil {
+		return fmt.Errorf("app: routed prefixes: %w", err)
+	}
+
+	tenant, err := s.store.GetTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	peer, err := s.store.GetPeer(ctx, peerID)
+	if err != nil {
+		return err
+	}
+	if peer.TenantID != tenantID {
+		return fmt.Errorf("app: peer %d does not belong to tenant %d", peerID, tenantID)
+	}
+
+	prevAllowedIPs, prevRoutedPrefixes := peer.AllowedIPs, peer.RoutedPrefixes
+	if err := s.store.SetPeerRouting(ctx, peerID, allowedIPs, routedPrefixes); err != nil {
+		return err
+	}
+	if routedPrefixes == prevRoutedPrefixes {
+		return nil // only the client-facing field changed — nothing live to resync
+	}
+	if err := s.syncTenantWireGuard(ctx, tenant); err != nil {
+		_ = s.store.SetPeerRouting(ctx, peerID, prevAllowedIPs, prevRoutedPrefixes)
+		return err
+	}
+	return nil
 }
 
 // PeerConfigText renders the full client-side .conf for a peer, ready to

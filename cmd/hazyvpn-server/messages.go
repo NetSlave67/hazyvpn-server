@@ -122,6 +122,10 @@ type exceptionsUpdatedMsg struct {
 	err error
 }
 
+type peerRoutingUpdatedMsg struct {
+	err error
+}
+
 type clearMessageMsg struct{}
 
 func clearMessageAfter(d time.Duration) tea.Cmd {

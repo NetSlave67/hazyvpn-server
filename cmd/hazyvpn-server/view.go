@@ -25,7 +25,7 @@ func (m model) render() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.helpView())
 	case modalTenantForm, modalPeerForm:
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.withSpinner(m.form.View()))
-	case modalPromptEmail, modalPromptImportPeer, modalPromptImportTenant, modalPromptExceptions:
+	case modalPromptEmail, modalPromptImportPeer, modalPromptImportTenant, modalPromptExceptions, modalPromptRouting:
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.withSpinner(m.prompt.View()))
 	case modalConfirmDeleteTenant:
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.confirmView(
@@ -79,7 +79,33 @@ func (m model) helpView() string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n" + dimStyle.Render("any key closes this"))
-	return helpOverlayStyle.Render(b.String())
+
+	body := lipgloss.JoinVertical(lipgloss.Center, b.String(), "", archLogo())
+	return helpOverlayStyle.Render(body)
+}
+
+// archLogo is a small, entirely unnecessary nod to whichever distro this is
+// probably running on top of — shown only here, in the opt-in help screen
+// (stacked *below* the keybindings, never beside them, so it only adds a
+// little height, never width — the help box briefly grew wider than a
+// normal terminal once the keybinding groups and this were joined
+// side-by-side, silently clipping both off-screen) so it never intrudes on
+// the main dashboard.
+func archLogo() string {
+	lines := []string{
+		`      /\`,
+		`     /  \`,
+		`    /    \`,
+		`   /      \`,
+		`  /   ||   \`,
+		` /    ||    \`,
+		`/______||____\`,
+	}
+	art := make([]string, len(lines))
+	for i, l := range lines {
+		art[i] = inputPromptStyle.Render(l)
+	}
+	return lipgloss.JoinVertical(lipgloss.Center, strings.Join(art, "\n"), dimStyle.Render("btw it's Arch"))
 }
 
 func (m model) viewTextModal() string {
@@ -99,11 +125,24 @@ func (m model) dashboardView() string {
 }
 
 func (m model) headerView() string {
-	title := titleStyle.Render("HazyVPN Server")
-	sub := dimStyle.Render(fmt.Sprintf("%d tenant(s)", len(m.tenants)))
-	rx, tx := m.overallTraffic()
-	traffic := dimStyle.Render(fmt.Sprintf("↓ %s  ↑ %s", formatBytes(rx), formatBytes(tx)))
-	return title + "  " + sub + "  " + traffic + "\n"
+	rxBps, txBps := m.overallRate()
+	left := titleStyle.Render("HazyVPN Server") + "  " +
+		dimStyle.Render(fmt.Sprintf("%d tenant(s)", len(m.tenants))) + "  " +
+		rateLine(rxBps, txBps)
+	right := dimStyle.Render(displayVersion())
+	pad := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+	if pad < 1 {
+		pad = 1
+	}
+	return left + strings.Repeat(" ", pad) + right + "\n"
+}
+
+// rateLine renders a "↓ rate  ↑ rate" pair with download and upload each in
+// their own color, so the two numbers stay visually distinct at a glance.
+func rateLine(rxBps, txBps float64) string {
+	down := activeStyle.Render("↓ " + formatBitrate(rxBps))
+	up := inputPromptStyle.Render("↑ " + formatBitrate(txBps))
+	return down + "  " + up
 }
 
 func (m model) tenantsPane(height int) string {
@@ -117,8 +156,8 @@ func (m model) tenantsPane(height int) string {
 	for i, t := range m.tenants {
 		line := fmt.Sprintf("%s · %s · :%d", t.Name, t.Subnet, t.ListenPort)
 		if t.Enabled {
-			rx, tx := m.tenantTraffic(t.ID)
-			line += fmt.Sprintf(" · ↓%s ↑%s", formatBytes(rx), formatBytes(tx))
+			rxBps, txBps := m.tenantRate(t.ID)
+			line += " · " + rateLine(rxBps, txBps)
 		} else {
 			line += " · disabled"
 		}

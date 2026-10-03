@@ -569,7 +569,7 @@ func TestSetPeerEnabledExcludesFromLiveConfig(t *testing.T) {
 	}
 }
 
-func TestSetTenantIsolationExceptionsValidatesBeforeStoring(t *testing.T) {
+func TestAddFirewallRuleValidatesBeforeStoring(t *testing.T) {
 	fn := &fakeNet{}
 	svc, st := newTestService(t, fn)
 	ctx := context.Background()
@@ -579,19 +579,32 @@ func TestSetTenantIsolationExceptionsValidatesBeforeStoring(t *testing.T) {
 		t.Fatalf("CreateTenant: %v", err)
 	}
 
-	if err := svc.SetTenantIsolationExceptions(ctx, tenant.ID, "not-an-ip"); err == nil {
-		t.Fatal("expected a garbage exception entry to be rejected")
+	cases := []struct {
+		name string
+		in   store.FirewallRuleInput
+	}{
+		{"bad action", store.FirewallRuleInput{TenantID: tenant.ID, Action: "deny", Address: "10.8.0.5"}},
+		{"bad address", store.FirewallRuleInput{TenantID: tenant.ID, Action: "allow", Address: "not-an-ip"}},
+		{"bad port", store.FirewallRuleInput{TenantID: tenant.ID, Action: "allow", Address: "10.8.0.5", Port: 70000}},
+		{"bad protocol", store.FirewallRuleInput{TenantID: tenant.ID, Action: "allow", Port: 80, Protocol: "icmp"}},
+		{"neither address nor port", store.FirewallRuleInput{TenantID: tenant.ID, Action: "allow"}},
 	}
-	got, err := st.GetTenant(ctx, tenant.ID)
+	for _, c := range cases {
+		if _, err := svc.AddFirewallRule(ctx, c.in); err == nil {
+			t.Errorf("%s: expected AddFirewallRule to reject %+v", c.name, c.in)
+		}
+	}
+
+	rules, err := st.ListFirewallRules(ctx, tenant.ID)
 	if err != nil {
-		t.Fatalf("GetTenant: %v", err)
+		t.Fatalf("ListFirewallRules: %v", err)
 	}
-	if got.IsolationExceptions != "" {
-		t.Fatalf("a rejected exceptions update must not be stored, got %q", got.IsolationExceptions)
+	if len(rules) != 0 {
+		t.Fatalf("a rejected rule must not be stored, got %d rules", len(rules))
 	}
 }
 
-func TestSetTenantIsolationExceptionsAppliesToLiveFirewall(t *testing.T) {
+func TestAddFirewallRuleAppliesToLiveFirewall(t *testing.T) {
 	fn := &fakeNet{}
 	svc, st := newTestService(t, fn)
 	ctx := context.Background()
@@ -601,23 +614,30 @@ func TestSetTenantIsolationExceptionsAppliesToLiveFirewall(t *testing.T) {
 		t.Fatalf("CreateTenant: %v", err)
 	}
 
-	if err := svc.SetTenantIsolationExceptions(ctx, tenant.ID, "10.8.0.5"); err != nil {
-		t.Fatalf("SetTenantIsolationExceptions: %v", err)
-	}
-	got, err := st.GetTenant(ctx, tenant.ID)
+	rule, err := svc.AddFirewallRule(ctx, store.FirewallRuleInput{TenantID: tenant.ID, Action: "block", Address: "10.8.0.5", Port: 22, Protocol: "tcp"})
 	if err != nil {
-		t.Fatalf("GetTenant: %v", err)
+		t.Fatalf("AddFirewallRule: %v", err)
 	}
-	if got.IsolationExceptions != "10.8.0.5" {
-		t.Fatalf("IsolationExceptions = %q, want %q", got.IsolationExceptions, "10.8.0.5")
+
+	got, err := st.ListFirewallRules(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("ListFirewallRules: %v", err)
 	}
+	if len(got) != 1 || got[0].ID != rule.ID {
+		t.Fatalf("expected the new rule to be stored, got %+v", got)
+	}
+
 	lastSpec := fn.firewallSpecs[len(fn.firewallSpecs)-1]
-	if len(lastSpec.Exceptions) != 1 || lastSpec.Exceptions[0].String() != "10.8.0.5/32" {
-		t.Fatalf("expected the applied firewall spec to carry the new exception, got %+v", lastSpec.Exceptions)
+	if len(lastSpec.Rules) != 1 {
+		t.Fatalf("expected the applied firewall spec to carry the new rule, got %+v", lastSpec.Rules)
+	}
+	applied := lastSpec.Rules[0]
+	if applied.Action != "block" || applied.Address != "10.8.0.5" || applied.Port != 22 || applied.Protocol != "tcp" {
+		t.Fatalf("applied rule = %+v, does not match what was added", applied)
 	}
 }
 
-func TestSetTenantIsolationExceptionsRollsBackOnApplyFailure(t *testing.T) {
+func TestAddFirewallRuleRollsBackOnApplyFailure(t *testing.T) {
 	fn := &fakeNet{}
 	svc, st := newTestService(t, fn)
 	ctx := context.Background()
@@ -628,15 +648,145 @@ func TestSetTenantIsolationExceptionsRollsBackOnApplyFailure(t *testing.T) {
 	}
 
 	fn.failMethod = "ApplyFirewall"
-	if err := svc.SetTenantIsolationExceptions(ctx, tenant.ID, "10.8.0.5"); err == nil {
+	if _, err := svc.AddFirewallRule(ctx, store.FirewallRuleInput{TenantID: tenant.ID, Action: "allow", Address: "10.8.0.5"}); err == nil {
 		t.Fatal("expected the ApplyFirewall failure to surface")
 	}
-	got, err := st.GetTenant(ctx, tenant.ID)
+	rules, err := st.ListFirewallRules(ctx, tenant.ID)
 	if err != nil {
-		t.Fatalf("GetTenant: %v", err)
+		t.Fatalf("ListFirewallRules: %v", err)
 	}
-	if got.IsolationExceptions != "" {
-		t.Fatalf("expected the exceptions update to be rolled back, got %q", got.IsolationExceptions)
+	if len(rules) != 0 {
+		t.Fatalf("expected the rule to be rolled back, got %d rules", len(rules))
+	}
+}
+
+func TestDeleteFirewallRuleAppliesToLiveFirewall(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820, IsolatePeers: true})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	rule, err := svc.AddFirewallRule(ctx, store.FirewallRuleInput{TenantID: tenant.ID, Action: "allow", Address: "10.8.0.5"})
+	if err != nil {
+		t.Fatalf("AddFirewallRule: %v", err)
+	}
+
+	if err := svc.DeleteFirewallRule(ctx, tenant.ID, rule.ID); err != nil {
+		t.Fatalf("DeleteFirewallRule: %v", err)
+	}
+	rules, err := st.ListFirewallRules(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("ListFirewallRules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Fatalf("expected the rule to be gone, got %+v", rules)
+	}
+	lastSpec := fn.firewallSpecs[len(fn.firewallSpecs)-1]
+	if len(lastSpec.Rules) != 0 {
+		t.Fatalf("expected the live firewall to be re-applied without the deleted rule, got %+v", lastSpec.Rules)
+	}
+}
+
+func TestDeleteFirewallRuleRollsBackOnApplyFailure(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820, IsolatePeers: true})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	rule, err := svc.AddFirewallRule(ctx, store.FirewallRuleInput{TenantID: tenant.ID, Action: "allow", Address: "10.8.0.5"})
+	if err != nil {
+		t.Fatalf("AddFirewallRule: %v", err)
+	}
+
+	fn.failMethod = "ApplyFirewall"
+	if err := svc.DeleteFirewallRule(ctx, tenant.ID, rule.ID); err == nil {
+		t.Fatal("expected the ApplyFirewall failure to surface")
+	}
+	rules, err := st.ListFirewallRules(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("ListFirewallRules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected the delete to be rolled back (rule restored), got %d rules", len(rules))
+	}
+	if rules[0].Address != "10.8.0.5" || rules[0].Action != "allow" {
+		t.Fatalf("restored rule doesn't match the original, got %+v", rules[0])
+	}
+}
+
+func TestMoveFirewallRuleReordersAndReapplies(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820, IsolatePeers: true})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	first, err := svc.AddFirewallRule(ctx, store.FirewallRuleInput{TenantID: tenant.ID, Action: "block", Address: "10.8.0.0/24"})
+	if err != nil {
+		t.Fatalf("AddFirewallRule(first): %v", err)
+	}
+	second, err := svc.AddFirewallRule(ctx, store.FirewallRuleInput{TenantID: tenant.ID, Action: "allow", Address: "10.8.0.5"})
+	if err != nil {
+		t.Fatalf("AddFirewallRule(second): %v", err)
+	}
+
+	// second is currently evaluated after first (a blanket block followed by
+	// a specific allow) — move it up so the allow takes effect instead.
+	if err := svc.MoveFirewallRule(ctx, tenant.ID, second.ID, true); err != nil {
+		t.Fatalf("MoveFirewallRule(up): %v", err)
+	}
+	rules, err := st.ListFirewallRules(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("ListFirewallRules: %v", err)
+	}
+	if len(rules) != 2 || rules[0].ID != second.ID || rules[1].ID != first.ID {
+		t.Fatalf("expected order [second, first] after moving second up, got %+v", rules)
+	}
+
+	lastSpec := fn.firewallSpecs[len(fn.firewallSpecs)-1]
+	if len(lastSpec.Rules) != 2 || lastSpec.Rules[0].Address != "10.8.0.5" {
+		t.Fatalf("expected the re-applied firewall to reflect the new order, got %+v", lastSpec.Rules)
+	}
+}
+
+func TestMoveFirewallRuleAtBoundaryIsNoop(t *testing.T) {
+	fn := &fakeNet{}
+	svc, st := newTestService(t, fn)
+	ctx := context.Background()
+
+	tenant, err := svc.CreateTenant(ctx, CreateTenantParams{Name: "acme", Subnet: "10.8.0.0/24", ListenPort: 51820, IsolatePeers: true})
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	rule, err := svc.AddFirewallRule(ctx, store.FirewallRuleInput{TenantID: tenant.ID, Action: "allow", Address: "10.8.0.5"})
+	if err != nil {
+		t.Fatalf("AddFirewallRule: %v", err)
+	}
+
+	callsBefore := len(fn.firewallCalls)
+	if err := svc.MoveFirewallRule(ctx, tenant.ID, rule.ID, true); err != nil {
+		t.Fatalf("MoveFirewallRule(up) at the top of the list: %v", err)
+	}
+	if err := svc.MoveFirewallRule(ctx, tenant.ID, rule.ID, false); err != nil {
+		t.Fatalf("MoveFirewallRule(down) at the bottom of the list: %v", err)
+	}
+	if len(fn.firewallCalls) != callsBefore {
+		t.Fatalf("a no-op move must not re-apply the live firewall, got %d new ApplyFirewall calls", len(fn.firewallCalls)-callsBefore)
+	}
+	rules, err := st.ListFirewallRules(ctx, tenant.ID)
+	if err != nil {
+		t.Fatalf("ListFirewallRules: %v", err)
+	}
+	if len(rules) != 1 || rules[0].ID != rule.ID {
+		t.Fatalf("expected the single rule to be unchanged, got %+v", rules)
 	}
 }
 

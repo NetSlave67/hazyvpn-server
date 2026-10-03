@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"hazyvpn-server/internal/app"
 	"hazyvpn-server/internal/store"
@@ -17,7 +18,6 @@ func newTenantFormModel(subnet string, port int) *form {
 	f.addText("Keepalive", "seconds", "25")
 	f.addToggle("Preshared Key", "default on for new peers", true)
 	f.addToggle("Isolate Peers", "block peers from reaching each other", true)
-	f.addText("Isolation Exceptions", "optional, comma-separated IPs/CIDRs reachable despite isolation", "")
 	f.focusField()
 	return f
 }
@@ -39,14 +39,13 @@ func tenantParamsFromForm(f *form) (app.CreateTenantParams, error) {
 		}
 	}
 	return app.CreateTenantParams{
-		Name:                name,
-		Subnet:              f.value("Subnet"),
-		ListenPort:          port,
-		DNS:                 f.value("DNS"),
-		Keepalive:           keepalive,
-		PSKRequired:         f.toggle("Preshared Key"),
-		IsolatePeers:        f.toggle("Isolate Peers"),
-		IsolationExceptions: f.value("Isolation Exceptions"),
+		Name:         name,
+		Subnet:       f.value("Subnet"),
+		ListenPort:   port,
+		DNS:          f.value("DNS"),
+		Keepalive:    keepalive,
+		PSKRequired:  f.toggle("Preshared Key"),
+		IsolatePeers: f.toggle("Isolate Peers"),
 	}, nil
 }
 
@@ -92,4 +91,49 @@ func newPromptForm(title, label, help, value string) *form {
 	f.addText(label, help, value)
 	f.focusField()
 	return f
+}
+
+// newFirewallRuleFormModel builds the add-rule form for a tenant's custom
+// firewall. A rule needs at least an address or a port to match on — an
+// empty form (both blank) matches everything, which firewallRuleInputFromForm
+// rejects rather than letting an operator accidentally add a rule that
+// silently allows or blocks all traffic.
+func newFirewallRuleFormModel(tenantName string) *form {
+	f := newForm("Add Firewall Rule — " + tenantName)
+	f.addToggle("Block", "block instead of allow", false)
+	f.addText("Address", "CIDR or single IP — blank = any", "")
+	f.addText("Port", "blank = any port", "")
+	f.addText("Protocol", "tcp, udp, or blank = both", "")
+	f.focusField()
+	return f
+}
+
+func firewallRuleInputFromForm(f *form, tenantID int64) (store.FirewallRuleInput, error) {
+	action := "allow"
+	if f.toggle("Block") {
+		action = "block"
+	}
+	address := f.value("Address")
+	port := 0
+	if v := f.value("Port"); v != "" {
+		p, err := strconv.Atoi(v)
+		if err != nil || p < 0 || p > 65535 {
+			return store.FirewallRuleInput{}, fmt.Errorf("port must be a number from 0-65535")
+		}
+		port = p
+	}
+	protocol := strings.ToLower(f.value("Protocol"))
+	if protocol != "" && protocol != "tcp" && protocol != "udp" {
+		return store.FirewallRuleInput{}, fmt.Errorf("protocol must be tcp, udp, or blank")
+	}
+	if address == "" && port == 0 {
+		return store.FirewallRuleInput{}, fmt.Errorf("enter an address, a port, or both")
+	}
+	return store.FirewallRuleInput{
+		TenantID: tenantID,
+		Action:   action,
+		Address:  address,
+		Port:     port,
+		Protocol: protocol,
+	}, nil
 }

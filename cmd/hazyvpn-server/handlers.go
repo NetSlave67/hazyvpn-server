@@ -274,17 +274,6 @@ func (m model) updatePrompt(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.busy = true
 		return m, tea.Batch(importTenant(m.svc, path, newName, newPort), m.spin.Tick)
 
-	case modalPromptExceptions:
-		t := m.selectedTenant()
-		if t == nil {
-			m.modal, m.prompt = modalNone, nil
-			return m, nil
-		}
-		exceptions := m.prompt.value("Exceptions")
-		m.modal, m.prompt = modalNone, nil
-		m.busy = true
-		return m, tea.Batch(updateExceptions(m.svc, t.ID, exceptions), m.spin.Tick)
-
 	case modalPromptRouting:
 		t, p := m.selectedTenant(), m.selectedPeer()
 		if t == nil || p == nil {
@@ -415,19 +404,187 @@ func (m model) startToggle() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(togglePeerEnabled(m.svc, t.ID, p.ID, !p.Enabled), m.spin.Tick)
 }
 
-// startExceptionsPrompt opens the isolation-exceptions editor for the
-// selected tenant (available from either pane — it's always a tenant-level
-// setting), pre-filled with its current value.
-func (m model) startExceptionsPrompt() (tea.Model, tea.Cmd) {
+// startFirewallRules opens the firewall-rules list for the selected tenant
+// (available from either pane — it's always a tenant-level setting).
+func (m model) startFirewallRules() (tea.Model, tea.Cmd) {
 	t := m.selectedTenant()
 	if t == nil {
 		m.setMessage(warnStyle.Render("Select a tenant first"))
 		return m, clearMessageAfter(messageTTL)
 	}
-	m.prompt = newPromptForm("Isolation Exceptions — "+t.Name, "Exceptions",
-		"comma-separated IPs/CIDRs reachable despite isolation", t.IsolationExceptions)
-	m.modal = modalPromptExceptions
+	m.modal = modalFirewallRules
+	m.firewallCursor = 0
+	m.busy = true
+	return m, tea.Batch(loadFirewallRules(m.svc, t.ID), m.spin.Tick)
+}
+
+// --- Firewall rules modal --------------------------------------------------
+
+func (m model) onFirewallRulesLoaded(msg firewallRulesLoadedMsg) (tea.Model, tea.Cmd) {
+	m.busy = false
+	t := m.selectedTenant()
+	if t == nil || t.ID != msg.tenantID {
+		return m, nil // selection moved on before this response arrived
+	}
+	if msg.err != nil {
+		m.setMessage(errorStyle.Render("Loading firewall rules: " + msg.err.Error()))
+		m.modal = modalNone
+		return m, clearMessageAfter(messageTTL)
+	}
+	m.firewallRules = msg.rules
+	if m.firewallTrackID != 0 {
+		for i, r := range m.firewallRules {
+			if r.ID == m.firewallTrackID {
+				m.firewallCursor = i
+				break
+			}
+		}
+		m.firewallTrackID = 0
+	}
+	if m.firewallCursor >= len(m.firewallRules) {
+		m.firewallCursor = max(0, len(m.firewallRules)-1)
+	}
 	return m, nil
+}
+
+func (m model) onFirewallRuleAdded(msg firewallRuleAddedMsg) (tea.Model, tea.Cmd) {
+	m.busy = false
+	if msg.err != nil {
+		if m.form != nil {
+			m.form.errMsg = msg.err.Error()
+		}
+		return m, nil
+	}
+	m.modal, m.form = modalFirewallRules, nil
+	m.setMessage(activeStyle.Render("Firewall rule added"))
+	if msg.rule != nil {
+		m.firewallTrackID = msg.rule.ID
+	}
+	t := m.selectedTenant()
+	if t == nil {
+		return m, clearMessageAfter(messageTTL)
+	}
+	return m, tea.Batch(loadFirewallRules(m.svc, t.ID), clearMessageAfter(messageTTL))
+}
+
+func (m model) onFirewallRuleDeleted(msg firewallRuleDeletedMsg) (tea.Model, tea.Cmd) {
+	m.busy = false
+	if msg.err != nil {
+		m.setMessage(errorStyle.Render("Delete failed: " + msg.err.Error()))
+		return m, clearMessageAfter(messageTTL)
+	}
+	m.setMessage(dimStyle.Render("Firewall rule deleted"))
+	t := m.selectedTenant()
+	if t == nil {
+		return m, clearMessageAfter(messageTTL)
+	}
+	return m, tea.Batch(loadFirewallRules(m.svc, t.ID), clearMessageAfter(messageTTL))
+}
+
+func (m model) onFirewallRuleMoved(msg firewallRuleMovedMsg) (tea.Model, tea.Cmd) {
+	m.busy = false
+	if msg.err != nil {
+		m.setMessage(errorStyle.Render("Reorder failed: " + msg.err.Error()))
+		return m, clearMessageAfter(messageTTL)
+	}
+	t := m.selectedTenant()
+	if t == nil {
+		return m, nil
+	}
+	return m, loadFirewallRules(m.svc, t.ID)
+}
+
+// updateFirewallRules handles keys while the firewall-rules list modal is
+// open: navigate with the normal up/down keys, shift+k/shift+j to reorder
+// (regular j/k are already taken by navigation, same as everywhere else in
+// this app), a to add, x to delete (with confirmation), esc to close.
+func (m model) updateFirewallRules(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	t := m.selectedTenant()
+	if t == nil {
+		m.modal = modalNone
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc", "q":
+		m.modal = modalNone
+		return m, nil
+	case "up", "k":
+		if n := len(m.firewallRules); n > 0 {
+			m.firewallCursor = (m.firewallCursor - 1 + n) % n
+		}
+		return m, nil
+	case "down", "j":
+		if n := len(m.firewallRules); n > 0 {
+			m.firewallCursor = (m.firewallCursor + 1) % n
+		}
+		return m, nil
+	case "K":
+		r := m.selectedFirewallRule()
+		if r == nil {
+			return m, nil
+		}
+		m.firewallTrackID = r.ID
+		m.busy = true
+		return m, tea.Batch(moveFirewallRule(m.svc, t.ID, r.ID, true), m.spin.Tick)
+	case "J":
+		r := m.selectedFirewallRule()
+		if r == nil {
+			return m, nil
+		}
+		m.firewallTrackID = r.ID
+		m.busy = true
+		return m, tea.Batch(moveFirewallRule(m.svc, t.ID, r.ID, false), m.spin.Tick)
+	case "a":
+		m.form = newFirewallRuleFormModel(t.Name)
+		m.modal = modalFirewallRuleForm
+		return m, nil
+	case "x":
+		if m.selectedFirewallRule() == nil {
+			return m, nil
+		}
+		m.modal = modalConfirmDeleteFirewallRule
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m model) updateFirewallRuleForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "esc" {
+		m.modal, m.form = modalFirewallRules, nil
+		return m, nil
+	}
+	submitted, cmd := m.form.handleKey(msg)
+	if !submitted {
+		return m, cmd
+	}
+	t := m.selectedTenant()
+	if t == nil {
+		m.modal, m.form = modalNone, nil
+		return m, nil
+	}
+	in, err := firewallRuleInputFromForm(m.form, t.ID)
+	if err != nil {
+		m.form.errMsg = err.Error()
+		return m, nil
+	}
+	m.form.errMsg = ""
+	m.busy = true
+	return m, tea.Batch(addFirewallRule(m.svc, in), m.spin.Tick)
+}
+
+func (m model) updateConfirmDeleteFirewallRule(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	t := m.selectedTenant()
+	r := m.selectedFirewallRule()
+	if msg.String() != "y" && msg.String() != "enter" {
+		m.modal = modalFirewallRules
+		return m, nil
+	}
+	m.modal = modalFirewallRules
+	if t == nil || r == nil {
+		return m, nil
+	}
+	m.busy = true
+	return m, tea.Batch(deleteFirewallRule(m.svc, t.ID, r.ID), m.spin.Tick)
 }
 
 // startRoutingPrompt opens the routing editor for the selected peer: its

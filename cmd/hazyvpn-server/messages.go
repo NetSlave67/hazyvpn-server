@@ -118,11 +118,27 @@ type togglePeerEnabledMsg struct {
 	err    error
 }
 
-type exceptionsUpdatedMsg struct {
+type peerRoutingUpdatedMsg struct {
 	err error
 }
 
-type peerRoutingUpdatedMsg struct {
+type firewallRulesLoadedMsg struct {
+	tenantID int64
+	rules    []store.FirewallRule
+	err      error
+}
+
+type firewallRuleAddedMsg struct {
+	rule *store.FirewallRule
+	err  error
+}
+
+type firewallRuleDeletedMsg struct {
+	id  int64
+	err error
+}
+
+type firewallRuleMovedMsg struct {
 	err error
 }
 

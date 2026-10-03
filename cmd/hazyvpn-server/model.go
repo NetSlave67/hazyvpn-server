@@ -37,8 +37,10 @@ const (
 	modalPromptEmail
 	modalPromptImportPeer
 	modalPromptImportTenant
-	modalPromptExceptions
 	modalPromptRouting
+	modalFirewallRules
+	modalFirewallRuleForm
+	modalConfirmDeleteFirewallRule
 )
 
 type model struct {
@@ -57,6 +59,22 @@ type model struct {
 	prompt   *form // single-field form reused for email/import path prompts
 	viewText string
 	viewKind string // "Config" or "QR" — used as the view modal's heading
+
+	// firewallRules/firewallCursor back the modalFirewallRules list modal:
+	// the selected tenant's custom rules, in evaluation order, and which row
+	// is selected for delete/move. Loaded fresh whenever the modal opens and
+	// after every add/delete/move so the displayed order always matches what
+	// was actually applied live.
+	firewallRules  []store.FirewallRule
+	firewallCursor int
+	// firewallTrackID, when non-zero, is a rule ID that the next
+	// firewallRulesLoadedMsg should move the cursor onto (by looking up its
+	// new position), rather than leaving the cursor at its old numeric
+	// index. Without this, moving a rule up/down re-sorts the list but the
+	// cursor stays at the same row number, so the highlight jumps onto a
+	// *different* rule than the one just moved — confusing when reordering
+	// repeatedly, since the next keypress would then move the wrong rule.
+	firewallTrackID int64
 
 	// allStats holds live peer stats for every enabled tenant, keyed by
 	// tenant ID and then by peer public key — fetched for every tenant (not
@@ -125,6 +143,13 @@ func (m model) selectedPeer() *store.Peer {
 		return nil
 	}
 	return &m.peers[m.peerCursor]
+}
+
+func (m model) selectedFirewallRule() *store.FirewallRule {
+	if m.firewallCursor < 0 || m.firewallCursor >= len(m.firewallRules) {
+		return nil
+	}
+	return &m.firewallRules[m.firewallCursor]
 }
 
 func (m *model) clampCursors() {

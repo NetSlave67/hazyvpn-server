@@ -60,15 +60,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, clearMessageAfter(messageTTL)
 
-	case exceptionsUpdatedMsg:
-		m.busy = false
-		if msg.err != nil {
-			m.setMessage(errorStyle.Render("Could not update exceptions: " + msg.err.Error()))
-			return m, clearMessageAfter(messageTTL)
-		}
-		m.setMessage(activeStyle.Render("Isolation exceptions updated"))
-		return m, tea.Batch(loadTenants(m.svc), clearMessageAfter(messageTTL))
-
 	case peerRoutingUpdatedMsg:
 		m.busy = false
 		if msg.err != nil {
@@ -101,6 +92,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onConfigText(msg)
 	case qrReadyMsg:
 		return m.onQRReady(msg)
+	case firewallRulesLoadedMsg:
+		return m.onFirewallRulesLoaded(msg)
+	case firewallRuleAddedMsg:
+		return m.onFirewallRuleAdded(msg)
+	case firewallRuleDeletedMsg:
+		return m.onFirewallRuleDeleted(msg)
+	case firewallRuleMovedMsg:
+		return m.onFirewallRuleMoved(msg)
 	case emailSentMsg:
 		m.busy = false
 		if msg.err != nil {
@@ -173,8 +172,14 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case modalViewText:
 		m.modal = modalNone
 		return m, nil
-	case modalPromptEmail, modalPromptImportPeer, modalPromptImportTenant, modalPromptExceptions, modalPromptRouting:
+	case modalPromptEmail, modalPromptImportPeer, modalPromptImportTenant, modalPromptRouting:
 		return m.updatePrompt(msg)
+	case modalFirewallRules:
+		return m.updateFirewallRules(msg)
+	case modalFirewallRuleForm:
+		return m.updateFirewallRuleForm(msg)
+	case modalConfirmDeleteFirewallRule:
+		return m.updateConfirmDeleteFirewallRule(msg)
 	}
 	return m.handleNormalKey(msg)
 }
@@ -224,8 +229,8 @@ func (m model) handleNormalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.startEmailPrompt()
 	case key.Matches(msg, m.keys.Toggle):
 		return m.startToggle()
-	case key.Matches(msg, m.keys.Exceptions):
-		return m.startExceptionsPrompt()
+	case key.Matches(msg, m.keys.Firewall):
+		return m.startFirewallRules()
 	case key.Matches(msg, m.keys.Routing):
 		return m.startRoutingPrompt()
 	}

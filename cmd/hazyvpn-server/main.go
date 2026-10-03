@@ -160,7 +160,7 @@ Keys (inside the TUI):
   v          view config      g     show QR
   c          copy to clipboard d    export
   i          import           e     email config
-  o          isolation exceptions
+  o          firewall rules
   r          edit peer routing
   ?          help             q     quit`)
 }

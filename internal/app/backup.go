@@ -9,12 +9,14 @@ import (
 	"hazyvpn-server/internal/store"
 )
 
-// TenantBackup is a full, restorable snapshot of one tenant: its settings
-// and every peer's keys and address. It contains private keys in plaintext
-// JSON, so operators should handle backup files like any other secret.
+// TenantBackup is a full, restorable snapshot of one tenant: its settings,
+// every peer's keys and address, and its custom firewall rules. It
+// contains private keys in plaintext JSON, so operators should handle
+// backup files like any other secret.
 type TenantBackup struct {
-	Tenant store.TenantInput `json:"tenant"`
-	Peers  []store.PeerInput `json:"peers"`
+	Tenant        store.TenantInput         `json:"tenant"`
+	Peers         []store.PeerInput         `json:"peers"`
+	FirewallRules []store.FirewallRuleInput `json:"firewall_rules"`
 }
 
 // ExportTenantBackup serializes a tenant and all of its peers to JSON.
@@ -27,6 +29,10 @@ func (s *Service) ExportTenantBackup(ctx context.Context, tenantID int64) ([]byt
 	if err != nil {
 		return nil, err
 	}
+	rules, err := s.store.ListFirewallRules(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
 
 	backup := TenantBackup{
 		Tenant: store.TenantInput{
@@ -34,7 +40,6 @@ func (s *Service) ExportTenantBackup(ctx context.Context, tenantID int64) ([]byt
 			ServerPrivateKey: tenant.ServerPrivateKey, ServerPublicKey: tenant.ServerPublicKey,
 			DNS: tenant.DNS, AllowedIPs: tenant.AllowedIPs, Keepalive: tenant.Keepalive,
 			PSKRequired: tenant.PSKRequired, IsolatePeers: tenant.IsolatePeers,
-			IsolationExceptions: tenant.IsolationExceptions,
 		},
 	}
 	for _, p := range peers {
@@ -43,6 +48,15 @@ func (s *Service) ExportTenantBackup(ctx context.Context, tenantID int64) ([]byt
 			PrivateKey: p.PrivateKey, PresharedKey: p.PresharedKey,
 			AllowedIPs: p.AllowedIPs, RoutedPrefixes: p.RoutedPrefixes,
 			DNS: p.DNS, Keepalive: p.Keepalive,
+		})
+	}
+	// Rules are already in evaluation order (ListFirewallRules sorts by
+	// priority) — restoring them in this same slice order and assigning
+	// fresh sequential priorities on import preserves that order without
+	// needing to carry the exact priority integers across the boundary.
+	for _, r := range rules {
+		backup.FirewallRules = append(backup.FirewallRules, store.FirewallRuleInput{
+			Action: r.Action, Address: r.Address, Port: r.Port, Protocol: r.Protocol,
 		})
 	}
 
@@ -99,6 +113,13 @@ func (s *Service) ImportTenantBackup(ctx context.Context, data []byte, newName s
 		if _, err := s.store.CreatePeer(ctx, p); err != nil {
 			_ = s.store.DeleteTenant(ctx, tenant.ID)
 			return nil, fmt.Errorf("app: restoring peer %q: %w", p.Name, err)
+		}
+	}
+	for i, r := range backup.FirewallRules {
+		r.TenantID = tenant.ID
+		if _, err := s.store.CreateFirewallRule(ctx, r, i+1); err != nil {
+			_ = s.store.DeleteTenant(ctx, tenant.ID)
+			return nil, fmt.Errorf("app: restoring firewall rule %d: %w", i+1, err)
 		}
 	}
 

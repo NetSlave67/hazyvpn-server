@@ -23,9 +23,9 @@ func (m model) render() string {
 	switch m.modal {
 	case modalHelp:
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.helpView())
-	case modalTenantForm, modalPeerForm:
+	case modalTenantForm, modalPeerForm, modalFirewallRuleForm:
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.withSpinner(m.form.View()))
-	case modalPromptEmail, modalPromptImportPeer, modalPromptImportTenant, modalPromptExceptions, modalPromptRouting:
+	case modalPromptEmail, modalPromptImportPeer, modalPromptImportTenant, modalPromptRouting:
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.withSpinner(m.prompt.View()))
 	case modalConfirmDeleteTenant:
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.confirmView(
@@ -35,6 +35,10 @@ func (m model) render() string {
 			fmt.Sprintf("Remove peer %q?", peerNameOr(m.selectedPeer(), "?"))))
 	case modalViewText:
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.viewTextModal())
+	case modalFirewallRules:
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.withSpinner(m.firewallRulesView()))
+	case modalConfirmDeleteFirewallRule:
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.confirmView("Delete this firewall rule?"))
 	}
 
 	return m.dashboardView()
@@ -230,6 +234,57 @@ func (m model) peersPane(height int) string {
 		style = activePaneStyle
 	}
 	return style.Width(width).Height(height).Render(b.String())
+}
+
+// firewallRulesView renders the selected tenant's custom firewall rules as
+// a numbered, ordered list — the row order *is* the evaluation/priority
+// order, so "easy to see priority" falls out of just numbering the rows
+// top to bottom, same order nftables itself evaluates them in.
+func (m model) firewallRulesView() string {
+	t := m.selectedTenant()
+	title := "Firewall Rules"
+	if t != nil {
+		title = "Firewall Rules — " + t.Name
+	}
+	var b strings.Builder
+	b.WriteString(helpTitleStyle.Render(title))
+	b.WriteString("\n\n")
+	if len(m.firewallRules) == 0 {
+		b.WriteString(dimStyle.Render("No custom rules yet — press a to add one.\n"))
+	}
+	for i, r := range m.firewallRules {
+		line := fmt.Sprintf("%2d. %s", i+1, firewallRuleLine(r))
+		if i == m.firewallCursor {
+			b.WriteString(inputPromptStyle.Render("› ") + selectedNameStyle.Render(line) + "\n")
+		} else {
+			b.WriteString("  " + itemStyle.Render(line) + "\n")
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("Evaluated top to bottom — first match wins."))
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("a add · x delete · shift+k/shift+j reorder · esc close"))
+	return helpOverlayStyle.Render(b.String())
+}
+
+func firewallRuleLine(r store.FirewallRule) string {
+	verb := activeStyle.Render("ALLOW")
+	if r.Action == "block" {
+		verb = errorStyle.Render("BLOCK")
+	}
+	target := "any address"
+	if r.Address != "" {
+		target = r.Address
+	}
+	port := "any port"
+	if r.Port != 0 {
+		proto := r.Protocol
+		if proto == "" {
+			proto = "tcp+udp"
+		}
+		port = fmt.Sprintf("%s/%d", proto, r.Port)
+	}
+	return fmt.Sprintf("%s  %-15s  %s", verb, target, port)
 }
 
 func (m model) footerView() string {

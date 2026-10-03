@@ -9,46 +9,46 @@ import (
 )
 
 type keyMap struct {
-	Up         key.Binding
-	Down       key.Binding
-	Tab        key.Binding
-	NewTenant  key.Binding
-	NewPeer    key.Binding
-	Delete     key.Binding
-	View       key.Binding
-	QR         key.Binding
-	Export     key.Binding
-	Import     key.Binding
-	Email      key.Binding
-	Copy       key.Binding
-	Toggle     key.Binding
-	Exceptions key.Binding
-	Routing    key.Binding
-	Help       key.Binding
-	Quit       key.Binding
-	ForceQuit  key.Binding
+	Up        key.Binding
+	Down      key.Binding
+	Tab       key.Binding
+	NewTenant key.Binding
+	NewPeer   key.Binding
+	Delete    key.Binding
+	View      key.Binding
+	QR        key.Binding
+	Export    key.Binding
+	Import    key.Binding
+	Email     key.Binding
+	Copy      key.Binding
+	Toggle    key.Binding
+	Firewall  key.Binding
+	Routing   key.Binding
+	Help      key.Binding
+	Quit      key.Binding
+	ForceQuit key.Binding
 }
 
 func newKeyMap() keyMap {
 	return keyMap{
-		Up:         key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("↑/k", "move up")),
-		Down:       key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("↓/j", "move down")),
-		Tab:        key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "switch pane")),
-		NewTenant:  key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new tenant")),
-		NewPeer:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add peer")),
-		Delete:     key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")),
-		View:       key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "view config")),
-		QR:         key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "show QR")),
-		Export:     key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "download/export")),
-		Import:     key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "import")),
-		Email:      key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "email config")),
-		Copy:       key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy to clipboard")),
-		Toggle:     key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "enable/disable")),
-		Exceptions: key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "isolation exceptions")),
-		Routing:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "edit routing")),
-		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:       key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
-		ForceQuit:  key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "force quit")),
+		Up:        key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("↑/k", "move up")),
+		Down:      key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("↓/j", "move down")),
+		Tab:       key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "switch pane")),
+		NewTenant: key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new tenant")),
+		NewPeer:   key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add peer")),
+		Delete:    key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")),
+		View:      key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "view config")),
+		QR:        key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "show QR")),
+		Export:    key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "download/export")),
+		Import:    key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "import")),
+		Email:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "email config")),
+		Copy:      key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy to clipboard")),
+		Toggle:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "enable/disable")),
+		Firewall:  key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "firewall rules")),
+		Routing:   key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "edit routing")),
+		Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:      key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
+		ForceQuit: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "force quit")),
 	}
 }
 
@@ -62,7 +62,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.NewTenant, k.NewPeer, k.Delete, k.Toggle},
 		{k.View, k.QR, k.Copy},
 		{k.Export, k.Email, k.Import},
-		{k.Exceptions, k.Routing},
+		{k.Firewall, k.Routing},
 		{k.Help, k.Quit, k.ForceQuit},
 	}
 }

@@ -105,7 +105,17 @@ func (f *form) handleKey(msg tea.KeyPressMsg) (submitted bool, cmd tea.Cmd) {
 
 	cur := &f.fields[f.focus]
 	if cur.isToggle {
-		if msg.String() == " " || msg.String() == "left" || msg.String() == "right" {
+		// bubbletea v2 renders the space bar's KeyPressMsg.String() as the
+		// word "space", never a literal " " — Key.String() falls through to
+		// Keystroke() whenever Text == " ", and Keystroke() writes "space"
+		// for that key. Checking only " " here meant every toggle field in
+		// this TUI (Preshared Key, Isolate Peers, and the newer firewall
+		// rule Block toggle) could never actually be flipped by pressing
+		// space; it went unnoticed because every toggle's chosen default
+		// happened to be the value most users wanted anyway. Found live
+		// while testing that the firewall rule form's Block toggle
+		// wouldn't flip.
+		if msg.String() == "space" || msg.String() == "left" || msg.String() == "right" {
 			cur.toggleVal = !cur.toggleVal
 		}
 		return false, nil

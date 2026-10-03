@@ -190,11 +190,11 @@ func (s *Service) UpdatePeerRouting(ctx context.Context, tenantID, peerID int64,
 	if allowedIPs == "" {
 		return fmt.Errorf("app: allowed IPs is required")
 	}
-	if _, err := parseExceptions(allowedIPs); err != nil {
+	if _, err := parseCIDRList(allowedIPs); err != nil {
 		return fmt.Errorf("app: allowed IPs: %w", err)
 	}
 	routedPrefixes = strings.TrimSpace(routedPrefixes)
-	if _, err := parseExceptions(routedPrefixes); err != nil {
+	if _, err := parseCIDRList(routedPrefixes); err != nil {
 		return fmt.Errorf("app: routed prefixes: %w", err)
 	}
 

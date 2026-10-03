@@ -68,16 +68,13 @@ type CreateTenantParams struct {
 	Keepalive    int
 	PSKRequired  bool
 	IsolatePeers bool
-	// IsolationExceptions are destination IPs/CIDRs, comma-separated, that
-	// stay reachable even with IsolatePeers on — see parseExceptions.
-	IsolationExceptions string
 }
 
-// parseExceptions parses a comma-separated list of IPs/CIDRs into the form
-// nftables rules need. A bare IP (no "/") is treated as a single host
-// (/32 or /128). Returns a specific error naming exactly which entry
-// didn't parse, rather than a generic "invalid exceptions" failure.
-func parseExceptions(raw string) ([]*net.IPNet, error) {
+// parseCIDRList parses a comma-separated list of IPs/CIDRs — used to
+// validate a peer's AllowedIPs/RoutedPrefixes. A bare IP (no "/") is
+// treated as a single host (/32 or /128). Returns a specific error naming
+// exactly which entry didn't parse, rather than a generic failure.
+func parseCIDRList(raw string) ([]*net.IPNet, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
@@ -106,17 +103,20 @@ func parseExceptions(raw string) ([]*net.IPNet, error) {
 	return out, nil
 }
 
-// firewallSpecFor builds the FirewallSpec for a tenant as currently stored,
-// parsing its isolation exceptions. Shared by every call site that applies
-// a tenant's firewall from its persisted settings (as opposed to
-// SetTenantIsolationExceptions, which validates a *new*, not-yet-stored
-// value before committing it).
-func firewallSpecFor(tenant *store.Tenant, subnet *net.IPNet) (netns.FirewallSpec, error) {
-	exceptions, err := parseExceptions(tenant.IsolationExceptions)
+// firewallSpecFor builds the live FirewallSpec for a tenant from its
+// currently stored settings and custom firewall rules. Shared by every call
+// site that applies a tenant's firewall from persisted state: tenant
+// creation, Reconcile, and any firewall-rule mutation.
+func (s *Service) firewallSpecFor(ctx context.Context, tenant *store.Tenant, subnet *net.IPNet) (netns.FirewallSpec, error) {
+	rules, err := s.store.ListFirewallRules(ctx, tenant.ID)
 	if err != nil {
-		return netns.FirewallSpec{}, fmt.Errorf("app: tenant %q has an invalid stored isolation exception %q: %w", tenant.Name, tenant.IsolationExceptions, err)
+		return netns.FirewallSpec{}, fmt.Errorf("app: listing firewall rules for tenant %q: %w", tenant.Name, err)
 	}
-	return netns.FirewallSpec{WGSubnet: subnet, IsolatePeers: tenant.IsolatePeers, Exceptions: exceptions}, nil
+	netRules := make([]netns.FirewallRule, 0, len(rules))
+	for _, r := range rules {
+		netRules = append(netRules, netns.FirewallRule{Action: r.Action, Address: r.Address, Port: r.Port, Protocol: r.Protocol})
+	}
+	return netns.FirewallSpec{WGSubnet: subnet, IsolatePeers: tenant.IsolatePeers, Rules: netRules}, nil
 }
 
 // SuggestSubnet returns the first /24 in 10.<n>.0.0/24 (n = 0..255) not
@@ -174,9 +174,6 @@ func (s *Service) CreateTenant(ctx context.Context, p CreateTenantParams) (*stor
 	if p.ListenPort <= 0 || p.ListenPort > 65535 {
 		return nil, fmt.Errorf("app: listen port %d is out of range", p.ListenPort)
 	}
-	if _, err := parseExceptions(p.IsolationExceptions); err != nil {
-		return nil, err
-	}
 	if existing, err := s.store.ListTenants(ctx); err == nil {
 		for _, t := range existing {
 			if t.ListenPort == p.ListenPort {
@@ -200,17 +197,16 @@ func (s *Service) CreateTenant(ctx context.Context, p CreateTenantParams) (*stor
 	}
 
 	tenant, err := s.store.CreateTenant(ctx, store.TenantInput{
-		Name:                p.Name,
-		Subnet:              subnet.String(),
-		ListenPort:          p.ListenPort,
-		ServerPrivateKey:    keypair.Private.String(),
-		ServerPublicKey:     keypair.Public.String(),
-		DNS:                 p.DNS,
-		AllowedIPs:          allowedIPs,
-		Keepalive:           keepalive,
-		PSKRequired:         p.PSKRequired,
-		IsolatePeers:        p.IsolatePeers,
-		IsolationExceptions: p.IsolationExceptions,
+		Name:             p.Name,
+		Subnet:           subnet.String(),
+		ListenPort:       p.ListenPort,
+		ServerPrivateKey: keypair.Private.String(),
+		ServerPublicKey:  keypair.Public.String(),
+		DNS:              p.DNS,
+		AllowedIPs:       allowedIPs,
+		Keepalive:        keepalive,
+		PSKRequired:      p.PSKRequired,
+		IsolatePeers:     p.IsolatePeers,
 	})
 	if err != nil {
 		return nil, err
@@ -246,7 +242,7 @@ func (s *Service) bringUpTenant(ctx context.Context, tenant *store.Tenant, subne
 	if err := s.syncTenantWireGuard(ctx, tenant); err != nil {
 		return err
 	}
-	spec, err := firewallSpecFor(tenant, subnet)
+	spec, err := s.firewallSpecFor(ctx, tenant, subnet)
 	if err != nil {
 		return err
 	}
@@ -314,7 +310,7 @@ func (s *Service) syncTenantWireGuard(ctx context.Context, tenant *store.Tenant)
 		if !p.Enabled || p.RoutedPrefixes == "" {
 			continue
 		}
-		prefixes, err := parseExceptions(p.RoutedPrefixes)
+		prefixes, err := parseCIDRList(p.RoutedPrefixes)
 		if err != nil {
 			continue // already validated when stored; ignore defensively rather than fail a sync
 		}
@@ -412,7 +408,7 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		if err := s.syncTenantWireGuard(ctx, tenant); err != nil {
 			return err
 		}
-		spec, err := firewallSpecFor(tenant, subnet)
+		spec, err := s.firewallSpecFor(ctx, tenant, subnet)
 		if err != nil {
 			return err
 		}
@@ -465,36 +461,163 @@ func (s *Service) SetTenantEnabled(ctx context.Context, tenantID int64, enabled 
 	return nil
 }
 
-// SetTenantIsolationExceptions replaces a tenant's isolation-exception list
-// (destination IPs/CIDRs that stay reachable despite IsolatePeers) and
-// re-applies its firewall immediately. Validates every entry before
-// touching storage, and rolls the stored value back if applying the new
-// firewall fails.
-func (s *Service) SetTenantIsolationExceptions(ctx context.Context, tenantID int64, exceptions string) error {
-	parsed, err := parseExceptions(exceptions)
-	if err != nil {
-		return err
-	}
-	tenant, err := s.store.GetTenant(ctx, tenantID)
-	if err != nil {
-		return err
+// --- Firewall rules ------------------------------------------------------
+//
+// Replaces the old free-text "isolation exceptions" field: a tenant's
+// custom firewall is now an ordered list of allow/block rules, each
+// matching on an optional destination address and/or port, evaluated in
+// Priority order before the tenant's default isolate-peers/internet-access
+// policy (see netns.Ruleset). Rows cascade-delete with their tenant at the
+// database level (ON DELETE CASCADE on firewall_rules.tenant_id), and the
+// live side is cleaned up for free too: deleting a tenant tears its whole
+// namespace down, nft table included, so there is nothing extra to clean up
+// here specifically for firewall rules.
+
+// reapplyFirewall re-renders and re-applies a tenant's live firewall from
+// its current stored settings and rules. Shared by every firewall-rule
+// mutation so a change takes effect immediately rather than waiting for the
+// next Reconcile.
+func (s *Service) reapplyFirewall(ctx context.Context, tenant *store.Tenant) error {
+	if !tenant.Enabled {
+		return nil // nothing live to re-apply to; Reconcile picks it up when enabled
 	}
 	subnet, err := ipam.ParseSubnet(tenant.Subnet)
 	if err != nil {
 		return err
 	}
-
-	previous := tenant.IsolationExceptions
-	if err := s.store.SetTenantIsolationExceptions(ctx, tenantID, exceptions); err != nil {
+	spec, err := s.firewallSpecFor(ctx, tenant, subnet)
+	if err != nil {
 		return err
 	}
-	if !tenant.Enabled {
-		return nil // nothing live to re-apply to; it'll pick this up when enabled
+	if err := s.net.ApplyFirewall(tenant.ID, spec); err != nil {
+		return fmt.Errorf("app: applying firewall for tenant %q: %w", tenant.Name, err)
 	}
-	spec := netns.FirewallSpec{WGSubnet: subnet, IsolatePeers: tenant.IsolatePeers, Exceptions: parsed}
-	if err := s.net.ApplyFirewall(tenantID, spec); err != nil {
-		_ = s.store.SetTenantIsolationExceptions(ctx, tenantID, previous)
-		return fmt.Errorf("app: applying firewall exceptions for tenant %q: %w", tenant.Name, err)
+	return nil
+}
+
+// validateFirewallRule checks a rule's fields before it's ever written to
+// storage or rendered into nft syntax.
+func validateFirewallRule(in store.FirewallRuleInput) error {
+	switch in.Action {
+	case "allow", "block":
+	default:
+		return fmt.Errorf("app: firewall rule action must be \"allow\" or \"block\", got %q", in.Action)
+	}
+	if in.Address != "" {
+		if _, _, err := net.ParseCIDR(in.Address); err != nil && net.ParseIP(in.Address) == nil {
+			return fmt.Errorf("app: %q is not a valid IP address or CIDR", in.Address)
+		}
+	}
+	if in.Port < 0 || in.Port > 65535 {
+		return fmt.Errorf("app: port %d is out of range", in.Port)
+	}
+	switch in.Protocol {
+	case "", "tcp", "udp":
+	default:
+		return fmt.Errorf("app: protocol must be \"tcp\", \"udp\", or empty (both), got %q", in.Protocol)
+	}
+	if in.Address == "" && in.Port == 0 {
+		return fmt.Errorf("app: a firewall rule needs an address, a port, or both to match on")
+	}
+	return nil
+}
+
+// ListFirewallRules returns a tenant's custom firewall rules in evaluation
+// order (lowest priority first).
+func (s *Service) ListFirewallRules(ctx context.Context, tenantID int64) ([]store.FirewallRule, error) {
+	return s.store.ListFirewallRules(ctx, tenantID)
+}
+
+// AddFirewallRule validates and appends a new rule to the end of a tenant's
+// evaluation order, then re-applies its live firewall immediately. Rolls
+// the stored rule back if applying it live fails, so a rule is never shown
+// as saved when it was never actually enforced.
+func (s *Service) AddFirewallRule(ctx context.Context, in store.FirewallRuleInput) (*store.FirewallRule, error) {
+	if err := validateFirewallRule(in); err != nil {
+		return nil, err
+	}
+	tenant, err := s.store.GetTenant(ctx, in.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	maxPriority, err := s.store.MaxFirewallRulePriority(ctx, in.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	rule, err := s.store.CreateFirewallRule(ctx, in, maxPriority+1)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.reapplyFirewall(ctx, tenant); err != nil {
+		_ = s.store.DeleteFirewallRule(ctx, rule.ID)
+		return nil, err
+	}
+	return rule, nil
+}
+
+// DeleteFirewallRule removes one rule and re-applies the tenant's live
+// firewall so the removal takes effect immediately. If re-applying fails,
+// the rule is recreated (at the same priority it held) so a rule that's
+// still live is never shown as deleted.
+func (s *Service) DeleteFirewallRule(ctx context.Context, tenantID, ruleID int64) error {
+	tenant, err := s.store.GetTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	rule, err := s.store.GetFirewallRule(ctx, ruleID)
+	if err != nil {
+		return err
+	}
+	if err := s.store.DeleteFirewallRule(ctx, ruleID); err != nil {
+		return err
+	}
+	if err := s.reapplyFirewall(ctx, tenant); err != nil {
+		restore := store.FirewallRuleInput{TenantID: tenant.ID, Action: rule.Action, Address: rule.Address, Port: rule.Port, Protocol: rule.Protocol}
+		if _, reErr := s.store.CreateFirewallRule(ctx, restore, rule.Priority); reErr != nil {
+			return fmt.Errorf("app: applying firewall after delete failed (%w), and restoring the rule also failed: %v", err, reErr)
+		}
+		return err
+	}
+	return nil
+}
+
+// MoveFirewallRule moves a rule earlier (up, evaluated sooner) or later
+// (down) in its tenant's evaluation order by swapping priorities with its
+// neighbor, then re-applies the live firewall so reordering an allow above
+// a block (or vice versa) takes effect immediately. Moving past either end
+// of the list is a silent no-op.
+func (s *Service) MoveFirewallRule(ctx context.Context, tenantID, ruleID int64, up bool) error {
+	tenant, err := s.store.GetTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	rules, err := s.store.ListFirewallRules(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	idx := -1
+	for i, r := range rules {
+		if r.ID == ruleID {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Errorf("app: firewall rule %d not found for tenant %q", ruleID, tenant.Name)
+	}
+	neighbor := idx + 1
+	if up {
+		neighbor = idx - 1
+	}
+	if neighbor < 0 || neighbor >= len(rules) {
+		return nil
+	}
+	if err := s.store.SwapFirewallRulePriorities(ctx, rules[idx].ID, rules[neighbor].ID); err != nil {
+		return err
+	}
+	if err := s.reapplyFirewall(ctx, tenant); err != nil {
+		_ = s.store.SwapFirewallRulePriorities(ctx, rules[idx].ID, rules[neighbor].ID)
+		return err
 	}
 	return nil
 }

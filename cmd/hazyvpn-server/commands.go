@@ -5,6 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"hazyvpn-server/internal/app"
+	"hazyvpn-server/internal/store"
 )
 
 // bgCtx is used for commands fired from the TUI's event loop. The program
@@ -124,10 +125,31 @@ func togglePeerEnabled(svc *app.Service, tenantID, peerID int64, enabled bool) t
 	}
 }
 
-func updateExceptions(svc *app.Service, tenantID int64, exceptions string) tea.Cmd {
+func loadFirewallRules(svc *app.Service, tenantID int64) tea.Cmd {
 	return func() tea.Msg {
-		err := svc.SetTenantIsolationExceptions(bgCtx, tenantID, exceptions)
-		return exceptionsUpdatedMsg{err: err}
+		rules, err := svc.ListFirewallRules(bgCtx, tenantID)
+		return firewallRulesLoadedMsg{tenantID: tenantID, rules: rules, err: err}
+	}
+}
+
+func addFirewallRule(svc *app.Service, in store.FirewallRuleInput) tea.Cmd {
+	return func() tea.Msg {
+		rule, err := svc.AddFirewallRule(bgCtx, in)
+		return firewallRuleAddedMsg{rule: rule, err: err}
+	}
+}
+
+func deleteFirewallRule(svc *app.Service, tenantID, ruleID int64) tea.Cmd {
+	return func() tea.Msg {
+		err := svc.DeleteFirewallRule(bgCtx, tenantID, ruleID)
+		return firewallRuleDeletedMsg{id: ruleID, err: err}
+	}
+}
+
+func moveFirewallRule(svc *app.Service, tenantID, ruleID int64, up bool) tea.Cmd {
+	return func() tea.Msg {
+		err := svc.MoveFirewallRule(bgCtx, tenantID, ruleID, up)
+		return firewallRuleMovedMsg{err: err}
 	}
 }
 

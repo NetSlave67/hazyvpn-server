@@ -52,6 +52,18 @@ CREATE TABLE IF NOT EXISTS peers (
 	UNIQUE(tenant_id, name),
 	UNIQUE(tenant_id, public_key)
 );
+
+CREATE TABLE IF NOT EXISTS firewall_rules (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	tenant_id   INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+	priority    INTEGER NOT NULL,
+	action      TEXT NOT NULL,
+	address     TEXT NOT NULL DEFAULT '',
+	port        INTEGER NOT NULL DEFAULT 0,
+	protocol    TEXT NOT NULL DEFAULT '',
+	created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(tenant_id, priority)
+);
 `
 
 // migrations are ALTER TABLE statements for columns added after a table's
@@ -144,11 +156,10 @@ func (s *Store) CreateTenant(ctx context.Context, in TenantInput) (*Tenant, erro
 
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO tenants (name, subnet, listen_port, server_private_key, server_public_key,
-			dns, allowed_ips, keepalive, psk_required, isolate_peers, isolation_exceptions, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+			dns, allowed_ips, keepalive, psk_required, isolate_peers, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 		in.Name, in.Subnet, in.ListenPort, sealedKey, in.ServerPublicKey,
 		in.DNS, in.AllowedIPs, in.Keepalive, boolToInt(in.PSKRequired), boolToInt(in.IsolatePeers),
-		in.IsolationExceptions,
 	)
 	if err != nil {
 		return nil, friendlyConflictError(err, "a tenant", map[string]string{
@@ -170,7 +181,7 @@ func (s *Store) scanTenant(row interface {
 	var psk, isolate, enabled int
 	var createdAt time.Time
 	if err := row.Scan(&t.ID, &t.Name, &t.Subnet, &t.ListenPort, &sealedKey, &t.ServerPublicKey,
-		&t.DNS, &t.AllowedIPs, &t.Keepalive, &psk, &isolate, &t.IsolationExceptions, &enabled, &createdAt); err != nil {
+		&t.DNS, &t.AllowedIPs, &t.Keepalive, &psk, &isolate, &enabled, &createdAt); err != nil {
 		return nil, err
 	}
 	key, err := s.sealer.OpenString(sealedKey)
@@ -186,7 +197,7 @@ func (s *Store) scanTenant(row interface {
 }
 
 const tenantColumns = `id, name, subnet, listen_port, server_private_key, server_public_key,
-			dns, allowed_ips, keepalive, psk_required, isolate_peers, isolation_exceptions, enabled, created_at`
+			dns, allowed_ips, keepalive, psk_required, isolate_peers, enabled, created_at`
 
 func (s *Store) GetTenant(ctx context.Context, id int64) (*Tenant, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+tenantColumns+` FROM tenants WHERE id = ?`, id)
@@ -257,9 +268,82 @@ func (s *Store) SetTenantEnabled(ctx context.Context, id int64, enabled bool) er
 	return nil
 }
 
-// SetTenantIsolationExceptions replaces a tenant's isolation-exception list.
-func (s *Store) SetTenantIsolationExceptions(ctx context.Context, id int64, exceptions string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE tenants SET isolation_exceptions = ? WHERE id = ?`, exceptions, id)
+// --- Firewall rules ------------------------------------------------------
+//
+// Rules cascade-delete with their tenant via the foreign key — no separate
+// cleanup code needed when a tenant is removed, the same way peers already
+// work.
+
+const firewallRuleColumns = `id, tenant_id, priority, action, address, port, protocol, created_at`
+
+func scanFirewallRule(row interface{ Scan(dest ...any) error }) (*FirewallRule, error) {
+	var r FirewallRule
+	if err := row.Scan(&r.ID, &r.TenantID, &r.Priority, &r.Action, &r.Address, &r.Port, &r.Protocol, &r.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// CreateFirewallRule inserts a rule at the given priority. Callers
+// (app.Service) are responsible for choosing a priority that doesn't
+// collide — typically one past the current highest for that tenant, to
+// append at the end.
+func (s *Store) CreateFirewallRule(ctx context.Context, in FirewallRuleInput, priority int) (*FirewallRule, error) {
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO firewall_rules (tenant_id, priority, action, address, port, protocol)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		in.TenantID, priority, in.Action, in.Address, in.Port, in.Protocol,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("store: reading new firewall rule id: %w", err)
+	}
+	return s.GetFirewallRule(ctx, id)
+}
+
+func (s *Store) GetFirewallRule(ctx context.Context, id int64) (*FirewallRule, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+firewallRuleColumns+` FROM firewall_rules WHERE id = ?`, id)
+	r, err := scanFirewallRule(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return r, err
+}
+
+// ListFirewallRules returns a tenant's rules in evaluation order (lowest
+// priority first).
+func (s *Store) ListFirewallRules(ctx context.Context, tenantID int64) ([]FirewallRule, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+firewallRuleColumns+` FROM firewall_rules WHERE tenant_id = ? ORDER BY priority`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []FirewallRule
+	for rows.Next() {
+		r, err := scanFirewallRule(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+// MaxFirewallRulePriority returns the highest priority currently used by a
+// tenant's rules, or 0 if it has none — so a new rule can be appended at
+// the end with priority+1.
+func (s *Store) MaxFirewallRulePriority(ctx context.Context, tenantID int64) (int, error) {
+	var max int
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(priority), 0) FROM firewall_rules WHERE tenant_id = ?`, tenantID).Scan(&max)
+	return max, err
+}
+
+func (s *Store) DeleteFirewallRule(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM firewall_rules WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -271,6 +355,38 @@ func (s *Store) SetTenantIsolationExceptions(ctx context.Context, id int64, exce
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SwapFirewallRulePriorities exchanges the priority of two rules — how
+// move-up/move-down is implemented, without needing to renumber every
+// other rule for that tenant.
+func (s *Store) SwapFirewallRulePriorities(ctx context.Context, aID, bID int64) error {
+	a, err := s.GetFirewallRule(ctx, aID)
+	if err != nil {
+		return err
+	}
+	b, err := s.GetFirewallRule(ctx, bID)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// A temporary priority sidesteps the UNIQUE(tenant_id, priority)
+	// constraint while the two values are mid-swap.
+	if _, err := tx.ExecContext(ctx, `UPDATE firewall_rules SET priority = -1 WHERE id = ?`, a.ID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE firewall_rules SET priority = ? WHERE id = ?`, a.Priority, b.ID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE firewall_rules SET priority = ? WHERE id = ?`, b.Priority, a.ID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // --- Peers -------------------------------------------------------------

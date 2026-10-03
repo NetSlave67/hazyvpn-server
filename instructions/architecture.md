@@ -64,11 +64,15 @@ interface, not raw syscalls, so it can be unit-tested with a fake.
 
 ### 4. Firewall — nftables, one ruleset per tenant namespace
 Default-deny forward, explicit allow for: tenant subnet → internet (NAT via
-host), optionally tenant subnet → specific allowed destinations/ports. Peer
-isolation (can a road-warrior reach other road-warriors in the same tenant)
-is a per-tenant toggle, default **on** (peers isolated from each other —
-typical road-warrior setup), since WireGuard's `AllowedIPs` alone doesn't
-stop peer-to-peer traffic at the server.
+host). Peer isolation (can a road-warrior reach other road-warriors in the
+same tenant) is a per-tenant toggle, default **on** (peers isolated from
+each other — typical road-warrior setup), since WireGuard's `AllowedIPs`
+alone doesn't stop peer-to-peer traffic at the server.
+
+On top of that, each tenant has an ordered list of custom firewall rules
+(`store.FirewallRule` / `internal/netns.FirewallRule`) — see "Custom
+firewall rules" below for the full redesign that replaced the original
+single-field "isolation exceptions" allow-list.
 
 ### 5. Storage
 `modernc.org/sqlite` (pure Go, no cgo) at `/var/lib/hazyvpn-server/db.sqlite`.
@@ -371,3 +375,127 @@ value needs to ask two separate questions**: does the crypto-routing need
 updating (`wg syncconf`), and does the kernel's actual routing table need
 updating too (`ip route`)? They are not the same operation and nothing
 does the second one for you outside of wg-quick.
+
+## Custom firewall rules — replacing "isolation exceptions" (2026-10-03)
+
+Martin disliked the original isolation-exceptions field (one free-text,
+comma-separated list of destination IPs/CIDRs that stayed reachable despite
+`IsolatePeers`): no way to see or control evaluation order, address-only,
+allow-only. He kept liking the base `IsolatePeers` toggle, but asked for
+real firewall control — address-based forward blocks (not just allows) and
+port-based rules — shown in the TUI in a way that's easy to read, add, and
+reorder, and that's fully cleaned up when its tenant is deleted.
+
+**Data model.** `firewall_rules` is a brand-new table (not a new column on
+an existing one, so no `ALTER TABLE` migration was needed — `CREATE TABLE
+IF NOT EXISTS` handles both fresh and pre-existing databases correctly for
+a table that didn't exist before; this is the opposite case from
+`isolation_exceptions`/`enabled`, which *did* need explicit migrations
+because they were new columns on tables that already existed in the wild).
+Columns: `id, tenant_id (FK ON DELETE CASCADE), priority, action
+("allow"|"block"), address, port, protocol, created_at`, with `UNIQUE
+(tenant_id, priority)`. The FK cascade means tenant deletion needs zero
+extra app-layer cleanup code for rules — verified live: deleting a tenant
+with a rule removed both the tenant row and its rule row in one step, same
+as it already does for peers. The old `isolation_exceptions` column is left
+physically in the schema/migrations as a harmless unused vestige rather
+than attempting a `DROP COLUMN` migration (not worth the risk for a column
+nothing reads anymore).
+
+**Rendering.** `netns.FirewallRule{Action, Address, Port, Protocol}` is the
+netns-level mirror of `store.FirewallRule` (same pattern as other
+app↔netns mirrors like `PeerStat`). `Ruleset()` renders each rule, in
+order, as one nft statement between `ct state established,related accept`
+and the isolate-peers drop/default-subnet-accept lines:
+- address only → `ip daddr <addr> <accept|drop>`
+- port only, no protocol → `meta l4proto { tcp, udp } th dport <port>
+  <accept|drop>` (matches both; `th dport` reads the transport header's
+  destination port field at the same offset for tcp and udp)
+- port + protocol → `<tcp|udp> dport <port> <accept|drop>`
+- address + port → both match expressions combined on one line
+
+Custom rules apply **unconditionally**, not just as exceptions to
+`IsolatePeers` — this is the key behavioral difference from the old field.
+A block for a specific address/port is a general firewall control; it
+needs to hold whether or not peer isolation happens to be on. nftables
+evaluates a chain top to bottom with first-match-wins, so an allow rule
+placed before a later block (or before the isolation drop) overrides it,
+exactly like an ACL.
+
+**Priority / ordering.** `priority` is a plain integer, lowest evaluated
+first; `ListFirewallRules` always returns `ORDER BY priority`, so "row
+order in the list" *is* "evaluation order" — no separate priority number
+needs to be shown. Move-up/move-down (`MoveFirewallRule`, bound to
+shift+k/shift+j in the rules modal, chosen because j/k are already
+cursor-navigation) swaps the selected rule's priority with its neighbor's
+via `SwapFirewallRulePriorities`, which routes through a temporary
+priority of `-1` mid-swap to avoid tripping the `UNIQUE(tenant_id,
+priority)` constraint — cheaper than renumbering every rule for a tenant
+on every reorder.
+
+**TUI.** New `modalFirewallRules` (scrollable numbered list — number *is*
+priority), `modalFirewallRuleForm` (reuses the existing generic `form`:
+one toggle for Block/Allow, three text fields for Address/Port/Protocol),
+and `modalConfirmDeleteFirewallRule`. Bound to the `o` key, replacing the
+old exceptions prompt. Every mutation (add/delete/move) re-applies the
+tenant's live firewall immediately and rolls the store change back if the
+live apply fails — same rollback-on-failure discipline as every other
+`Service` method.
+
+### Two real bugs found during live testing, neither related to the firewall rules logic itself
+
+1. **The space bar could never flip ANY toggle field, in the entire TUI,
+   since this project's first commit.** `form.go`'s toggle handler checked
+   `msg.String() == " "` to detect a space-bar press. bubbletea v2's
+   `KeyPressMsg.String()` renders the space key as the literal word
+   `"space"`, not a `" "` character — `Key.String()` falls through to
+   `Keystroke()` whenever `Text == " "`, and `Keystroke()` explicitly
+   writes `"space"` for `KeySpace`. So that comparison could never match.
+   This existed for the `Preshared Key` and `Isolate Peers` toggles from
+   day one; it went unnoticed because their defaults (`true`) happened to
+   be what most operators wanted, so nobody needed to flip them. It became
+   impossible to ignore the moment the firewall rule form's `Block` toggle
+   (default `false`) needed to be flippable to `true` — without the fix,
+   every firewall rule created through the TUI would silently be an allow
+   rule no matter what the operator intended. Fixed by checking `"space"`
+   instead of `" "`; confirmed live via tmux (space now correctly flips
+   `[ ] no` → `[x] yes`) and with a new regression test,
+   `TestFormToggleFlipsOnSpace`, constructing the exact `KeyPressMsg{Code:
+   ' ', Text: " "}` bubbletea v2 actually sends. **Lesson: when matching
+   `tea.KeyPressMsg.String()` for a key that isn't a plain printable
+   letter/digit, check the library's actual `Keystroke()`/`String()`
+   source for that key rather than assuming the naive literal value.**
+2. **Reordering a rule left the list-cursor highlighting the wrong row.**
+   `MoveFirewallRule` swaps priorities and the TUI just reloads the list by
+   tenant ID — but the cursor is a numeric index, and after a reorder the
+   rule that used to be at that index is a *different* rule. Moving a rule
+   up then pressing "move up" again would silently start moving the wrong
+   rule. Fixed by tracking the *moved rule's ID* (`model.firewallTrackID`)
+   across the reload and re-deriving the cursor's position from where that
+   ID landed in the freshly loaded list, instead of leaving the cursor at
+   its old numeric index. Applied the same ID-tracking to "jump to the rule
+   just added" after creating one, for consistency. Confirmed live via
+   tmux: moving a rule up now keeps it highlighted at its new position, so
+   repeated shift+k presses walk the same rule to the top.
+
+### Firewall verification methodology — proving rules actually drop packets, not just that they render correctly
+
+Unit tests (`internal/netns/firewall_test.go`) only check the *rendered nft
+text* — they can't catch a case where the text is syntactically plausible
+but semantically wrong (e.g. right rule, wrong chain/hook/order). Live
+testing against the real tenant only proves `nft -f -` accepted the syntax
+(no parse error), not that it actually blocks real traffic. To get real
+proof, built a disposable three-namespace router topology inside the
+running container (`fwtest-r` with veth links to `fwtest-a` and
+`fwtest-b`, IP forwarding, no WireGuard involved at all) and applied the
+*exact* nft text `Ruleset()` generates to `fwtest-r`'s forward chain, then
+drove real TCP/UDP connections with `nc` between the two leaf namespaces.
+Confirmed with real packets: an address+port+protocol block drops only
+that flow (an adjacent port still connects fine); an address-only block
+covers every port to that address; a port-only rule with no protocol
+blocks both TCP and UDP; and an allow rule listed before a later blanket
+block correctly overrides it (first-match-wins ordering holds under real
+traffic, not just in rendered text). Namespaces were torn down after.
+**This disposable-topology pattern is reusable for verifying any future
+nftables change without touching a real tenant** — three plain namespaces
+and veth pairs are enough to exercise a forward-chain ruleset end to end.
